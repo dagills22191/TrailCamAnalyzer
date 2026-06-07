@@ -50,6 +50,24 @@ EVENT_PATTERN = re.compile(
 LOG_FMT = "%(asctime)s  %(levelname)-8s  %(message)s"
 LOG_FMT_SHORT = "%(asctime)s  %(message)s"
 
+CONFIG_PATH = Path.home() / ".trailcam_sorter.json"
+
+
+def load_config() -> dict:
+    try:
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_config(data: dict):
+    try:
+        existing = load_config()
+        existing.update(data)
+        CONFIG_PATH.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -466,7 +484,8 @@ class TrailCamGUI:
 
         ctk.CTkLabel(folders, text="Output folder:", anchor="w", width=100
                      ).grid(row=1, column=0, padx=(12, 6), pady=(4, 10), sticky="w")
-        self.out_var = ctk.StringVar(value=str(Path.home() / "TrailCamAnimals"))
+        default_out = load_config().get("last_output", str(Path.home() / "TrailCamAnimals"))
+        self.out_var = ctk.StringVar(value=default_out)
         ctk.CTkEntry(folders, textvariable=self.out_var
                      ).grid(row=1, column=1, padx=4, pady=(4, 10), sticky="ew")
         ctk.CTkButton(folders, text="Browse", width=80,
@@ -653,6 +672,7 @@ class TrailCamGUI:
                     status_callback=lambda s: self._q.put(("status", s)),
                     cancel_event=self._cancel_event,
                 )
+                save_config({"last_output": str(dest_root)})
                 self._q.put(("done", "ok"))
             except Cancelled:
                 self._q.put(("log", "Run cancelled."))
