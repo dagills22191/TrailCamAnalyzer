@@ -202,7 +202,9 @@ def sort_files(
                 log.debug("Event %s: blank prediction, skipping", event_key)
                 continue
 
-            if not label or score < min_confidence or "unknown" in label.lower():
+            if not label or score < min_confidence \
+                    or "unknown" in label.lower() \
+                    or species_name.lower() == "animal":
                 log.debug("Event %s: score %.3f label '%s' -> Review",
                           event_key, score, label)
                 species_name = "Review"
@@ -535,6 +537,7 @@ class TrailCamGUI:
                     log=log,
                     progress_callback=lambda v: self._q.put(("progress", v)),
                 )
+                self._q.put(("log", f"\nOutput folder: {dest_root}"))
                 self._q.put(("done", "ok"))
             except Exception as exc:
                 log.error("Unexpected error: %s", exc)
