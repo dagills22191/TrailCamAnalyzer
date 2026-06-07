@@ -26,22 +26,27 @@ Automatically identifies animals in trail camera photos and videos using Google 
 
 ## Requirements
 
-- Windows, macOS, or Linux
-- [Miniconda](https://docs.anaconda.com/miniconda/) or Anaconda
-- ~1 GB disk space for model weights (downloaded automatically on first run)
+- [Miniconda](https://docs.anaconda.com/miniconda/) or Anaconda (Python 3.11)
+- ~1 GB disk space for model weights (downloaded automatically on first run to `~/.cache/kagglehub/`)
 - GPU optional — runs fine on CPU at ~1–3 sec/image
+
+**Python dependencies** (installed via pip):
+| Package | Purpose |
+|---|---|
+| `speciesnet` | Google's species classification model (pulls in PyTorch, MegaDetector, etc.) |
+| `customtkinter` | Modern GUI framework |
 
 ## Installation
 
 ```bash
 conda create -n trailcam python=3.11 pip -y
 conda activate trailcam
-pip install speciesnet
+pip install -r requirements.txt
 ```
 
 ## Usage
 
-**GUI folder picker (no arguments):**
+**GUI (recommended):**
 ```bash
 python trailcam_sorter.py
 ```
@@ -61,7 +66,7 @@ python trailcam_sorter.py "D:/TrailCam/June2024" --move -o "E:/Sorted" --confide
 **All options:**
 ```
 positional:
-  source              Folder to scan (recursive). Omit to open a folder picker.
+  source              Folder to scan (recursive). Omit to open the GUI.
 
 optional:
   -o, --output        Destination root (default: ~/TrailCamAnimals)
@@ -88,5 +93,5 @@ Files that don't match this pattern are ignored.
 ## Notes
 
 - Model weights are cached in `~/.cache/kagglehub/` after the first run
-- On Windows, `conda activate trailcam` must be active before running, or use the full Python path
 - SpeciesNet covers 2000+ species trained on 65M images (MegaDetector + EfficientNet V2 ensemble)
+- On Windows, run inside a `conda activate trailcam` session or use the full Python path
