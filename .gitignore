@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.env
+.venv/
+env/
+
+# Local launcher (contains machine-specific paths)
+sort.bat
+
+# Model cache
+.cache/
+
+# Output
+_sort_report.json
+
+# OS
+.DS_Store
+Thumbs.db
