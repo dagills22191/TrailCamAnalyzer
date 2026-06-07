@@ -39,6 +39,20 @@ from typing import Callable, Optional
 # ---------------------------------------------------------------------------
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+
+COUNTRY_CODES = [
+    "", "USA", "AUS", "BRA", "CAN", "CHN", "DEU", "FIN", "FRA",
+    "GBR", "IND", "JPN", "KEN", "MEX", "NOR", "NZL", "SWE", "TZA", "ZAF",
+]
+
+US_STATES = [
+    "", "AK", "AL", "AR", "AZ", "CA", "CO", "CT", "DC", "DE",
+    "FL", "GA", "HI", "IA", "ID", "IL", "IN", "KS", "KY", "LA",
+    "MA", "MD", "ME", "MI", "MN", "MO", "MS", "MT", "NC", "ND",
+    "NE", "NH", "NJ", "NM", "NV", "NY", "OH", "OK", "OR", "PA",
+    "RI", "SC", "SD", "TN", "TX", "UT", "VA", "VT", "WA", "WI",
+    "WV", "WY",
+]
 VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv"}
 ALL_EXTS = IMAGE_EXTS | VIDEO_EXTS
 
@@ -501,15 +515,21 @@ class TrailCamGUI:
 
         ctk.CTkLabel(opts, text="Country:").grid(row=0, column=0, padx=(12, 4), pady=(10, 4), sticky="e")
         self.country_var = ctk.StringVar(value="")
-        ctk.CTkEntry(opts, textvariable=self.country_var, width=65,
-                     placeholder_text="e.g. US"
-                     ).grid(row=0, column=1, padx=(0, 12), pady=(10, 4), sticky="w")
+        self.country_combo = ctk.CTkComboBox(
+            opts, variable=self.country_var, width=100,
+            values=COUNTRY_CODES,
+            command=self._on_country_change,
+        )
+        self.country_combo.grid(row=0, column=1, padx=(0, 12), pady=(10, 4), sticky="w")
 
-        ctk.CTkLabel(opts, text="Region:").grid(row=0, column=2, padx=(4, 4), pady=(10, 4), sticky="e")
+        ctk.CTkLabel(opts, text="Region (US):").grid(row=0, column=2, padx=(4, 4), pady=(10, 4), sticky="e")
         self.region_var = ctk.StringVar(value="")
-        ctk.CTkEntry(opts, textvariable=self.region_var, width=85,
-                     placeholder_text="e.g. US-VA"
-                     ).grid(row=0, column=3, padx=(0, 12), pady=(10, 4), sticky="w")
+        self.region_combo = ctk.CTkComboBox(
+            opts, variable=self.region_var, width=90,
+            values=US_STATES,
+            state="disabled",
+        )
+        self.region_combo.grid(row=0, column=3, padx=(0, 12), pady=(10, 4), sticky="w")
 
         ctk.CTkLabel(opts, text="Min confidence:").grid(row=0, column=4, padx=(4, 4), pady=(10, 4), sticky="e")
         self.conf_var = ctk.DoubleVar(value=0.4)
@@ -521,12 +541,27 @@ class TrailCamGUI:
                       ).grid(row=0, column=5, padx=4, pady=(10, 4))
         self.conf_label.grid(row=0, column=6, padx=(0, 12), pady=(10, 4), sticky="w")
 
+        ctk.CTkLabel(
+            opts,
+            text="Optional — geofencing is safe to use with correct codes. Region applies to USA only.",
+            font=ctk.CTkFont(size=10),
+            text_color="#7a9ab8",
+            anchor="w",
+        ).grid(row=1, column=0, columnspan=4, padx=(12, 4), pady=(0, 4), sticky="w")
+        ctk.CTkLabel(
+            opts,
+            text="0.4 default · lower = more results · higher = fewer, more certain",
+            font=ctk.CTkFont(size=10),
+            text_color="#7a9ab8",
+            anchor="w",
+        ).grid(row=1, column=4, columnspan=3, padx=(4, 12), pady=(0, 4), sticky="w")
+
         self.move_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(opts, text="Move files (don't copy)", variable=self.move_var
-                        ).grid(row=1, column=0, columnspan=3, padx=12, pady=(4, 10), sticky="w")
+                        ).grid(row=2, column=0, columnspan=3, padx=12, pady=(4, 10), sticky="w")
         self.dry_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(opts, text="Dry run (preview only)", variable=self.dry_var
-                        ).grid(row=1, column=3, columnspan=4, padx=12, pady=(4, 10), sticky="w")
+                        ).grid(row=2, column=3, columnspan=4, padx=12, pady=(4, 10), sticky="w")
 
         # ── Run / Cancel ──────────────────────────────────────────────────
         btn_row = ctk.CTkFrame(self.root, fg_color="transparent")
@@ -547,7 +582,15 @@ class TrailCamGUI:
             state="disabled",
             command=self._on_cancel,
         )
-        self.cancel_btn.grid(row=0, column=1, sticky="ew")
+        self.cancel_btn.grid(row=0, column=1, sticky="ew", padx=(6, 6))
+
+        self.close_btn = ctk.CTkButton(
+            btn_row, text="Close", height=44, width=90,
+            fg_color="#2b2b2b", hover_color="#3a3a3a",
+            font=ctk.CTkFont(size=13),
+            command=self.root.destroy,
+        )
+        self.close_btn.grid(row=0, column=2, sticky="ew")
 
         # ── Progress ──────────────────────────────────────────────────────
         prog_row = ctk.CTkFrame(self.root, fg_color="transparent")
@@ -573,6 +616,13 @@ class TrailCamGUI:
             font=ctk.CTkFont(family="Courier New", size=11),
         )
         self.log_box.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+
+    def _on_country_change(self, value: str):
+        if value == "USA":
+            self.region_combo.configure(state="normal")
+        else:
+            self.region_var.set("")
+            self.region_combo.configure(state="disabled")
 
     def _browse(self, var, title: str):
         from tkinter import filedialog
@@ -609,6 +659,7 @@ class TrailCamGUI:
                     self._set_progress(1.0 if value == "ok" else self.progress.get())
                     self.run_btn.configure(state="normal", text="Run")
                     self.cancel_btn.configure(state="disabled")
+                    self.close_btn.configure(state="normal")
                     self._running = False
                     return
         except queue.Empty:
@@ -645,6 +696,7 @@ class TrailCamGUI:
         self._cancel_event.clear()
         self.run_btn.configure(state="disabled", text="Running…")
         self.cancel_btn.configure(state="normal", text="Cancel")
+        self.close_btn.configure(state="disabled")
         self._running = True
         self.root.after(100, self._poll)
 
@@ -711,9 +763,9 @@ def main():
     parser.add_argument("-c", "--confidence", type=float, default=0.4,
                         help="Minimum confidence threshold (0-1).  Default: 0.4")
     parser.add_argument("--country", default=None,
-                        help="ISO 3166-1 alpha-2 country code (e.g. US)")
+                        help="ISO 3166-1 alpha-3 country code (e.g. USA)")
     parser.add_argument("--region", default=None,
-                        help="Admin1 region code (e.g. US-VA)")
+                        help="US state abbreviation (e.g. VA) — only applies when country=USA")
     parser.add_argument("--move", action="store_true",
                         help="Move files instead of copying.")
     parser.add_argument("--dry-run", action="store_true",

@@ -56,8 +56,8 @@ python trailcam_sorter.py
 # Dry run — shows what would happen, copies nothing
 python trailcam_sorter.py "D:/TrailCam/June2024" --dry-run
 
-# Copy files, US/Virginia geofencing for better accuracy
-python trailcam_sorter.py "D:/TrailCam/June2024" --country US --region US-VA
+# Copy files with optional geofencing (may suppress species if range data is incomplete)
+python trailcam_sorter.py "D:/TrailCam/June2024" --country USA --region VA
 
 # Move instead of copy, custom output folder, lower confidence threshold
 python trailcam_sorter.py "D:/TrailCam/June2024" --move -o "E:/Sorted" --confidence 0.3
@@ -71,8 +71,8 @@ positional:
 optional:
   -o, --output        Destination root (default: ~/TrailCamAnimals)
   -c, --confidence    Minimum confidence 0–1 (default: 0.4). Below this goes to Review/
-  --country           ISO 3166-1 alpha-2 code (e.g. US) — improves accuracy via geofencing
-  --region            Admin1 region code (e.g. US-VA) — finer geofencing
+  --country           ISO 3166-1 alpha-3 code (e.g. USA) — optional geofencing (see Notes)
+  --region            US state abbreviation (e.g. VA) — only applies when country=USA
   --move              Move files instead of copying
   --dry-run           Preview without touching any files
   -v, --verbose       Debug output
@@ -95,3 +95,4 @@ Files that don't match this pattern are ignored.
 - Model weights are cached in `~/.cache/kagglehub/` after the first run
 - SpeciesNet covers 2000+ species trained on 65M images (MegaDetector + EfficientNet V2 ensemble)
 - On Windows, run inside a `conda activate trailcam` session or use the full Python path
+- **Geofencing** (`--country`/`--region`) applies a geographic range prior from wildlife databases. Use ISO 3166-1 alpha-3 codes for country (e.g. `USA`, not `US`) and 2-letter state abbreviations for region (e.g. `VA`, not `US-VA`). Region is only supported for USA. Leaving both blank is safe; using the correct codes is also safe and may help with edge cases.
