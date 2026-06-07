@@ -211,7 +211,7 @@ def sort_files(
 
             if not label or score < min_confidence \
                     or "unknown" in label.lower() \
-                    or species_name.lower() == "animal":
+                    or species_name.lower() in ("animal", "no cv result"):
                 log.debug("Event %s: score %.3f label '%s' -> Review",
                           event_key, score, label)
                 species_name = "Review"
