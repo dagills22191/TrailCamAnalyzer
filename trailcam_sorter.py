@@ -149,6 +149,10 @@ def classify_images(
 # File mover / copier
 # ---------------------------------------------------------------------------
 
+class Cancelled(Exception):
+    pass
+
+
 def sort_files(
     events: dict[str, list[Path]],
     predictions: dict[str, dict],
@@ -159,6 +163,7 @@ def sort_files(
     dry_run: bool,
     log: logging.Logger,
     progress_callback: Optional[Callable[[float], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> dict[str, int]:
     """Copy/move files into species subfolders, renamed to yyyy-mm-dd_species.ext.
 
@@ -182,6 +187,8 @@ def sort_files(
 
     total_events = len(events)
     for i, (event_key, files) in enumerate(events.items()):
+        if cancel_event and cancel_event.is_set():
+            raise Cancelled()
         if progress_callback:
             progress_callback(0.85 + 0.15 * (i / max(total_events, 1)))
 
@@ -281,8 +288,13 @@ def run_sort(
     verbose: bool,
     log: logging.Logger,
     progress_callback: Optional[Callable[[float], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ):
-    """Run the full sort pipeline. Raises on error."""
+    """Run the full sort pipeline. Raises Cancelled if cancel_event is set."""
+    def check():
+        if cancel_event and cancel_event.is_set():
+            raise Cancelled()
+
     if progress_callback:
         progress_callback(0.0)
 
@@ -293,6 +305,7 @@ def run_sort(
         log.info("*** DRY RUN -- no files will be touched ***")
 
     # 1. Group files by event
+    check()
     events = group_events(source)
     if not events:
         log.warning("No matching files found in %s", source)
@@ -304,6 +317,7 @@ def run_sort(
         progress_callback(0.05)
 
     # 2. Pick representative images
+    check()
     rep_map: dict[str, Path] = {}
     images_to_classify: list[Path] = []
     for event_key, files in events.items():
@@ -323,7 +337,7 @@ def run_sort(
     if progress_callback:
         progress_callback(0.10)
 
-    # 3. Load model & run inference
+    # 3. Load model & run inference (cannot be interrupted mid-inference)
     model = load_model(log)
     if progress_callback:
         progress_callback(0.20)
@@ -331,6 +345,8 @@ def run_sort(
     predictions = classify_images(model, images_to_classify, country, region, log)
     if progress_callback:
         progress_callback(0.85)
+
+    check()  # honour cancel after inference completes
 
     species_seen: dict[str, int] = defaultdict(int)
     for pred in predictions.values():
@@ -345,6 +361,7 @@ def run_sort(
         events, predictions, rep_map,
         dest_root, confidence, move, dry_run, log,
         progress_callback=progress_callback,
+        cancel_event=cancel_event,
     )
 
     # 5. Write report
@@ -388,86 +405,140 @@ class TrailCamGUI:
 
         self.root = ctk.CTk()
         self.root.title("TrailCam Sorter")
-        self.root.geometry("720x680")
+        self.root.geometry("760x720")
         self.root.resizable(True, True)
+        self.root.minsize(640, 580)
 
         self._q: queue.Queue = queue.Queue()
         self._running = False
+        self._cancel_event = threading.Event()
 
         self._build_ui()
 
     def _build_ui(self):
         ctk = self.ctk
-        pad = {"padx": 16, "pady": 6}
+        pad = {"padx": 16, "pady": 5}
 
-        # ── Source folder ──────────────────────────────────────────────────
-        src_frame = ctk.CTkFrame(self.root)
-        src_frame.pack(fill="x", **pad)
-        ctk.CTkLabel(src_frame, text="Source folder:", width=110, anchor="w").pack(side="left", padx=(10, 4))
+        # ── Header ────────────────────────────────────────────────────────
+        header = ctk.CTkFrame(self.root, corner_radius=0, fg_color=("#1a6fa8", "#0d4f7a"))
+        header.pack(fill="x")
+        ctk.CTkLabel(
+            header,
+            text="TrailCam Sorter",
+            font=ctk.CTkFont(size=24, weight="bold"),
+            text_color="white",
+        ).pack(side="left", padx=20, pady=(14, 4))
+        ctk.CTkLabel(
+            header,
+            text="AI-powered species identification using Google SpeciesNet",
+            font=ctk.CTkFont(size=12),
+            text_color="#b0d4f0",
+        ).pack(side="left", padx=(0, 20), pady=(18, 4))
+
+        # ── Folders ───────────────────────────────────────────────────────
+        folders = ctk.CTkFrame(self.root)
+        folders.pack(fill="x", **pad)
+        folders.columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(folders, text="Source folder:", anchor="w", width=100
+                     ).grid(row=0, column=0, padx=(12, 6), pady=(10, 4), sticky="w")
         self.src_var = ctk.StringVar()
-        ctk.CTkEntry(src_frame, textvariable=self.src_var).pack(side="left", fill="x", expand=True, padx=4)
-        ctk.CTkButton(src_frame, text="Browse", width=80,
-                      command=lambda: self._browse(self.src_var, "Select trail-cam folder")).pack(side="left", padx=(4, 10))
+        ctk.CTkEntry(folders, textvariable=self.src_var, placeholder_text="Select the folder containing trail-cam files…"
+                     ).grid(row=0, column=1, padx=4, pady=(10, 4), sticky="ew")
+        ctk.CTkButton(folders, text="Browse", width=80,
+                      command=lambda: self._browse(self.src_var, "Select trail-cam folder")
+                      ).grid(row=0, column=2, padx=(4, 12), pady=(10, 4))
 
-        # ── Output folder ─────────────────────────────────────────────────
-        out_frame = ctk.CTkFrame(self.root)
-        out_frame.pack(fill="x", **pad)
-        ctk.CTkLabel(out_frame, text="Output folder:", width=110, anchor="w").pack(side="left", padx=(10, 4))
+        ctk.CTkLabel(folders, text="Output folder:", anchor="w", width=100
+                     ).grid(row=1, column=0, padx=(12, 6), pady=(4, 10), sticky="w")
         self.out_var = ctk.StringVar(value=str(Path.home() / "TrailCamAnimals"))
-        ctk.CTkEntry(out_frame, textvariable=self.out_var).pack(side="left", fill="x", expand=True, padx=4)
-        ctk.CTkButton(out_frame, text="Browse", width=80,
-                      command=lambda: self._browse(self.out_var, "Select output folder")).pack(side="left", padx=(4, 10))
+        ctk.CTkEntry(folders, textvariable=self.out_var
+                     ).grid(row=1, column=1, padx=4, pady=(4, 10), sticky="ew")
+        ctk.CTkButton(folders, text="Browse", width=80,
+                      command=lambda: self._browse(self.out_var, "Select output folder")
+                      ).grid(row=1, column=2, padx=(4, 12), pady=(4, 10))
 
-        # ── Options ────────────────────────────────────────────────────────
-        opt_frame = ctk.CTkFrame(self.root)
-        opt_frame.pack(fill="x", **pad)
-        opt_frame.columnconfigure((1, 3, 5), weight=1)
+        # ── Options ───────────────────────────────────────────────────────
+        opts = ctk.CTkFrame(self.root)
+        opts.pack(fill="x", **pad)
 
-        ctk.CTkLabel(opt_frame, text="Country:").grid(row=0, column=0, padx=(10, 4), pady=8, sticky="e")
+        ctk.CTkLabel(opts, text="Country:").grid(row=0, column=0, padx=(12, 4), pady=(10, 4), sticky="e")
         self.country_var = ctk.StringVar(value="US")
-        ctk.CTkEntry(opt_frame, textvariable=self.country_var, width=70).grid(row=0, column=1, padx=4, pady=8, sticky="w")
+        ctk.CTkEntry(opts, textvariable=self.country_var, width=65
+                     ).grid(row=0, column=1, padx=(0, 12), pady=(10, 4), sticky="w")
 
-        ctk.CTkLabel(opt_frame, text="Region:").grid(row=0, column=2, padx=(12, 4), pady=8, sticky="e")
+        ctk.CTkLabel(opts, text="Region:").grid(row=0, column=2, padx=(4, 4), pady=(10, 4), sticky="e")
         self.region_var = ctk.StringVar(value="US-VA")
-        ctk.CTkEntry(opt_frame, textvariable=self.region_var, width=90).grid(row=0, column=3, padx=4, pady=8, sticky="w")
+        ctk.CTkEntry(opts, textvariable=self.region_var, width=85
+                     ).grid(row=0, column=3, padx=(0, 12), pady=(10, 4), sticky="w")
 
-        ctk.CTkLabel(opt_frame, text="Min confidence:").grid(row=0, column=4, padx=(12, 4), pady=8, sticky="e")
+        ctk.CTkLabel(opts, text="Min confidence:").grid(row=0, column=4, padx=(4, 4), pady=(10, 4), sticky="e")
         self.conf_var = ctk.DoubleVar(value=0.4)
-        self.conf_label = ctk.CTkLabel(opt_frame, text="0.40", width=40)
-        self.conf_label.grid(row=0, column=6, padx=(2, 10), pady=8, sticky="w")
-        ctk.CTkSlider(opt_frame, from_=0.1, to=0.9, number_of_steps=16,
-                      variable=self.conf_var, width=140,
+        self.conf_label = ctk.CTkLabel(opts, text="0.40", width=38,
+                                       font=ctk.CTkFont(weight="bold"))
+        ctk.CTkSlider(opts, from_=0.1, to=0.9, number_of_steps=16,
+                      variable=self.conf_var, width=130,
                       command=lambda v: self.conf_label.configure(text=f"{float(v):.2f}")
-                      ).grid(row=0, column=5, padx=4, pady=8)
+                      ).grid(row=0, column=5, padx=4, pady=(10, 4))
+        self.conf_label.grid(row=0, column=6, padx=(0, 12), pady=(10, 4), sticky="w")
 
         self.move_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(opt_frame, text="Move files (don't copy)", variable=self.move_var
-                        ).grid(row=1, column=0, columnspan=3, padx=10, pady=(0, 8), sticky="w")
-
+        ctk.CTkCheckBox(opts, text="Move files (don't copy)", variable=self.move_var
+                        ).grid(row=1, column=0, columnspan=3, padx=12, pady=(4, 10), sticky="w")
         self.dry_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(opt_frame, text="Dry run (preview only)", variable=self.dry_var
-                        ).grid(row=1, column=3, columnspan=3, padx=10, pady=(0, 8), sticky="w")
+        ctk.CTkCheckBox(opts, text="Dry run (preview only)", variable=self.dry_var
+                        ).grid(row=1, column=3, columnspan=4, padx=12, pady=(4, 10), sticky="w")
 
-        # ── Run button ────────────────────────────────────────────────────
-        self.run_btn = ctk.CTkButton(self.root, text="Run", height=42,
-                                     font=ctk.CTkFont(size=15, weight="bold"),
-                                     command=self._on_run)
-        self.run_btn.pack(fill="x", padx=16, pady=6)
+        # ── Run / Cancel ──────────────────────────────────────────────────
+        btn_row = ctk.CTkFrame(self.root, fg_color="transparent")
+        btn_row.pack(fill="x", padx=16, pady=5)
+        btn_row.columnconfigure(0, weight=1)
 
-        # ── Progress bar ──────────────────────────────────────────────────
-        self.progress = ctk.CTkProgressBar(self.root)
-        self.progress.pack(fill="x", padx=16, pady=(0, 6))
+        self.run_btn = ctk.CTkButton(
+            btn_row, text="Run", height=44,
+            font=ctk.CTkFont(size=15, weight="bold"),
+            command=self._on_run,
+        )
+        self.run_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+
+        self.cancel_btn = ctk.CTkButton(
+            btn_row, text="Cancel", height=44, width=100,
+            fg_color="#8b1a1a", hover_color="#6b1212",
+            font=ctk.CTkFont(size=13),
+            state="disabled",
+            command=self._on_cancel,
+        )
+        self.cancel_btn.grid(row=0, column=1, sticky="ew")
+
+        # ── Progress ──────────────────────────────────────────────────────
+        prog_row = ctk.CTkFrame(self.root, fg_color="transparent")
+        prog_row.pack(fill="x", padx=16, pady=(2, 4))
+        prog_row.columnconfigure(0, weight=1)
+
+        self.progress = ctk.CTkProgressBar(prog_row, height=16)
+        self.progress.grid(row=0, column=0, sticky="ew", padx=(0, 10))
         self.progress.set(0)
 
-        # ── Log output ────────────────────────────────────────────────────
-        self.log_box = ctk.CTkTextbox(self.root, font=ctk.CTkFont(family="Courier New", size=12))
+        self.pct_label = ctk.CTkLabel(prog_row, text="", width=42,
+                                      font=ctk.CTkFont(size=12, weight="bold"))
+        self.pct_label.grid(row=0, column=1)
+
+        # ── Log ───────────────────────────────────────────────────────────
+        self.log_box = ctk.CTkTextbox(
+            self.root,
+            font=ctk.CTkFont(family="Courier New", size=11),
+        )
         self.log_box.pack(fill="both", expand=True, padx=16, pady=(0, 16))
 
-    def _browse(self, var: object, title: str):
+    def _browse(self, var, title: str):
         from tkinter import filedialog
         folder = filedialog.askdirectory(title=title, parent=self.root)
         if folder:
             var.set(folder)
+
+    def _set_progress(self, value: float):
+        self.progress.set(value)
+        self.pct_label.configure(text=f"{int(value * 100)}%")
 
     def _append_log(self, msg: str):
         self.log_box.insert("end", msg + "\n")
@@ -480,16 +551,22 @@ class TrailCamGUI:
                 if kind == "log":
                     self._append_log(value)
                 elif kind == "progress":
-                    self.progress.set(value)
+                    self._set_progress(value)
                 elif kind == "done":
+                    self._set_progress(1.0 if value == "ok" else self.progress.get())
                     self.run_btn.configure(state="normal", text="Run")
-                    self.progress.set(1.0 if value == "ok" else self.progress.get())
+                    self.cancel_btn.configure(state="disabled")
                     self._running = False
                     return
         except queue.Empty:
             pass
         if self._running:
             self.root.after(100, self._poll)
+
+    def _on_cancel(self):
+        self._cancel_event.set()
+        self.cancel_btn.configure(state="disabled", text="Cancelling…")
+        self._append_log("Cancelling — will stop after current operation...")
 
     def _on_run(self):
         if self._running:
@@ -499,19 +576,20 @@ class TrailCamGUI:
         if not src_str:
             self._append_log("Please select a source folder first.")
             return
-
         source = Path(src_str)
         if not source.is_dir():
             self._append_log(f"Folder not found: {source}")
             return
 
         self.log_box.delete("1.0", "end")
-        self.progress.set(0)
+        self._set_progress(0)
+        self.pct_label.configure(text="")
+        self._cancel_event.clear()
         self.run_btn.configure(state="disabled", text="Running…")
+        self.cancel_btn.configure(state="normal", text="Cancel")
         self._running = True
         self.root.after(100, self._poll)
 
-        # Build a logger that feeds into our queue
         log = logging.getLogger("trailcam_gui")
         log.setLevel(logging.DEBUG)
         log.handlers.clear()
@@ -536,9 +614,13 @@ class TrailCamGUI:
                     verbose=False,
                     log=log,
                     progress_callback=lambda v: self._q.put(("progress", v)),
+                    cancel_event=self._cancel_event,
                 )
                 self._q.put(("log", f"\nOutput folder: {dest_root}"))
                 self._q.put(("done", "ok"))
+            except Cancelled:
+                self._q.put(("log", "Run cancelled."))
+                self._q.put(("done", "cancelled"))
             except Exception as exc:
                 log.error("Unexpected error: %s", exc)
                 self._q.put(("done", "error"))
