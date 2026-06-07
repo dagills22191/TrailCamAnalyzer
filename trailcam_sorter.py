@@ -228,11 +228,11 @@ def sort_files(
                 i2 += 1
 
             if dry_run:
-                log.info("[DRY RUN] %s  %s  ->  %s/%s", verb, f.name, species_name, dst.name)
+                log.debug("[DRY RUN] %s  %s  ->  %s/%s", verb, f.name, species_name, dst.name)
             else:
                 target_dir.mkdir(parents=True, exist_ok=True)
                 action(str(f), str(dst))
-                log.info("%s  %s  ->  %s/%s", verb, f.name, species_name, dst.name)
+                log.debug("%s  %s  ->  %s/%s", verb, f.name, species_name, dst.name)
 
             stats[species_name] += 1
 
@@ -288,12 +288,17 @@ def run_sort(
     verbose: bool,
     log: logging.Logger,
     progress_callback: Optional[Callable[[float], None]] = None,
+    status_callback: Optional[Callable[[str], None]] = None,
     cancel_event: Optional[threading.Event] = None,
 ):
     """Run the full sort pipeline. Raises Cancelled if cancel_event is set."""
     def check():
         if cancel_event and cancel_event.is_set():
             raise Cancelled()
+
+    def status(msg: str):
+        if status_callback:
+            status_callback(msg)
 
     if progress_callback:
         progress_callback(0.0)
@@ -306,6 +311,7 @@ def run_sort(
 
     # 1. Group files by event
     check()
+    status("Scanning files…")
     events = group_events(source)
     if not events:
         log.warning("No matching files found in %s", source)
@@ -338,10 +344,12 @@ def run_sort(
         progress_callback(0.10)
 
     # 3. Load model & run inference (cannot be interrupted mid-inference)
+    status("Loading model…")
     model = load_model(log)
     if progress_callback:
         progress_callback(0.20)
 
+    status(f"Running inference on {len(images_to_classify)} images…")
     predictions = classify_images(model, images_to_classify, country, region, log)
     if progress_callback:
         progress_callback(0.85)
@@ -357,6 +365,7 @@ def run_sort(
                        sorted(species_seen.items(), key=lambda x: -x[1])))
 
     # 4. Sort files
+    status("Copying files…" if not dry_run else "Previewing (dry run)…")
     stats = sort_files(
         events, predictions, rep_map,
         dest_root, confidence, move, dry_run, log,
@@ -369,14 +378,18 @@ def run_sort(
         write_report(dest_root, events, predictions, rep_map, stats, log)
 
     # Summary
+    total_sorted = sum(stats.values())
     log.info("")
     log.info("=== SORTING COMPLETE ===")
-    log.info("%-40s  %s", "Species / Category", "Files")
-    log.info("%-40s  %s", "-" * 40, "-----")
+    log.info("%-36s  %5s", "Species / Category", "Files")
+    log.info("%-36s  %5s", "-" * 36, "-----")
     for species, count in sorted(stats.items(), key=lambda x: -x[1]):
-        log.info("%-40s  %d", species, count)
-    log.info("%-40s  %d", "TOTAL", sum(stats.values()))
+        log.info("%-36s  %5d", species, count)
+    log.info("%-36s  %5d", "TOTAL", total_sorted)
+    log.info("")
+    log.info("Output: %s", dest_root)
 
+    status(f"Complete — {total_sorted} file{'s' if total_sorted != 1 else ''} sorted")
     if progress_callback:
         progress_callback(1.0)
 
@@ -411,6 +424,8 @@ class TrailCamGUI:
 
         self._q: queue.Queue = queue.Queue()
         self._running = False
+        self._busy = False        # True during model load + inference (animate bar)
+        self._anim_tick = 0.0
         self._cancel_event = threading.Event()
 
         self._build_ui()
@@ -523,6 +538,11 @@ class TrailCamGUI:
                                       font=ctk.CTkFont(size=12, weight="bold"))
         self.pct_label.grid(row=0, column=1)
 
+        self.status_label = ctk.CTkLabel(self.root, text="",
+                                         font=ctk.CTkFont(size=12),
+                                         text_color="#8ab4d4")
+        self.status_label.pack(anchor="w", padx=18, pady=(0, 4))
+
         # ── Log ───────────────────────────────────────────────────────────
         self.log_box = ctk.CTkTextbox(
             self.root,
@@ -537,6 +557,7 @@ class TrailCamGUI:
             var.set(folder)
 
     def _set_progress(self, value: float):
+        self._busy = False
         self.progress.set(value)
         self.pct_label.configure(text=f"{int(value * 100)}%")
 
@@ -545,6 +566,7 @@ class TrailCamGUI:
         self.log_box.see("end")
 
     def _poll(self):
+        import math
         try:
             while True:
                 kind, value = self._q.get_nowait()
@@ -552,6 +574,13 @@ class TrailCamGUI:
                     self._append_log(value)
                 elif kind == "progress":
                     self._set_progress(value)
+                elif kind == "status":
+                    self.status_label.configure(text=value)
+                    # Switch to animated bar during model load and inference
+                    busy = any(k in value for k in ("Loading model", "Running inference"))
+                    self._busy = busy
+                    if busy:
+                        self.pct_label.configure(text="")
                 elif kind == "done":
                     self._set_progress(1.0 if value == "ok" else self.progress.get())
                     self.run_btn.configure(state="normal", text="Run")
@@ -560,6 +589,10 @@ class TrailCamGUI:
                     return
         except queue.Empty:
             pass
+        # Animate progress bar during busy (indeterminate) phases
+        if self._busy:
+            self._anim_tick += 0.12
+            self.progress.set(0.5 + 0.42 * math.sin(self._anim_tick))
         if self._running:
             self.root.after(100, self._poll)
 
@@ -584,6 +617,7 @@ class TrailCamGUI:
         self.log_box.delete("1.0", "end")
         self._set_progress(0)
         self.pct_label.configure(text="")
+        self.status_label.configure(text="")
         self._cancel_event.clear()
         self.run_btn.configure(state="disabled", text="Running…")
         self.cancel_btn.configure(state="normal", text="Cancel")
@@ -614,9 +648,9 @@ class TrailCamGUI:
                     verbose=False,
                     log=log,
                     progress_callback=lambda v: self._q.put(("progress", v)),
+                    status_callback=lambda s: self._q.put(("status", s)),
                     cancel_event=self._cancel_event,
                 )
-                self._q.put(("log", f"\nOutput folder: {dest_root}"))
                 self._q.put(("done", "ok"))
             except Cancelled:
                 self._q.put(("log", "Run cancelled."))
