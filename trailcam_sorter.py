@@ -478,13 +478,15 @@ class TrailCamGUI:
         opts.pack(fill="x", **pad)
 
         ctk.CTkLabel(opts, text="Country:").grid(row=0, column=0, padx=(12, 4), pady=(10, 4), sticky="e")
-        self.country_var = ctk.StringVar(value="US")
-        ctk.CTkEntry(opts, textvariable=self.country_var, width=65
+        self.country_var = ctk.StringVar(value="")
+        ctk.CTkEntry(opts, textvariable=self.country_var, width=65,
+                     placeholder_text="e.g. US"
                      ).grid(row=0, column=1, padx=(0, 12), pady=(10, 4), sticky="w")
 
         ctk.CTkLabel(opts, text="Region:").grid(row=0, column=2, padx=(4, 4), pady=(10, 4), sticky="e")
-        self.region_var = ctk.StringVar(value="US-VA")
-        ctk.CTkEntry(opts, textvariable=self.region_var, width=85
+        self.region_var = ctk.StringVar(value="")
+        ctk.CTkEntry(opts, textvariable=self.region_var, width=85,
+                     placeholder_text="e.g. US-VA"
                      ).grid(row=0, column=3, padx=(0, 12), pady=(10, 4), sticky="w")
 
         ctk.CTkLabel(opts, text="Min confidence:").grid(row=0, column=4, padx=(4, 4), pady=(10, 4), sticky="e")
