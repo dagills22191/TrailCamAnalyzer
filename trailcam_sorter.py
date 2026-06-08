@@ -197,10 +197,11 @@ def sort_files(
     move: bool,
     dry_run: bool,
     log: logging.Logger,
+    subfolders: bool = True,
     progress_callback: Optional[Callable[[float], None]] = None,
     cancel_event: Optional[threading.Event] = None,
 ) -> dict[str, int]:
-    """Copy/move files into species subfolders, renamed to yyyy-mm-dd_species.ext.
+    """Copy/move files into species subfolders, renamed to yyyy-mm-dd_HH-MM-SS_species.ext.
 
     Blank predictions are skipped. Low-confidence/unknown go to Review/.
     Video-only events are matched to classified image events by minute.
@@ -252,11 +253,12 @@ def sort_files(
                 species_name = "Review"
 
         date_str = f"{event_key[:4]}-{event_key[4:6]}-{event_key[6:8]}"
-        target_dir = dest_root / species_name
+        time_str = f"{event_key[9:11]}-{event_key[11:13]}-{event_key[13:15]}"
+        target_dir = dest_root / species_name if subfolders else dest_root
 
         for f in files:
             ext = f.suffix.lower()
-            dst = target_dir / f"{date_str}_{species_name}{ext}"
+            dst = target_dir / f"{date_str}_{time_str}_{species_name}{ext}"
             i2 = 2
             while dst.exists():
                 dst = target_dir / f"{date_str}_{species_name}_{i2}{ext}"
@@ -322,6 +324,7 @@ def run_sort(
     dry_run: bool,
     verbose: bool,
     log: logging.Logger,
+    subfolders: bool = True,
     progress_callback: Optional[Callable[[float], None]] = None,
     status_callback: Optional[Callable[[str], None]] = None,
     cancel_event: Optional[threading.Event] = None,
@@ -404,6 +407,7 @@ def run_sort(
     stats = sort_files(
         events, predictions, rep_map,
         dest_root, confidence, move, dry_run, log,
+        subfolders=subfolders,
         progress_callback=progress_callback,
         cancel_event=cancel_event,
     )
@@ -558,10 +562,13 @@ class TrailCamGUI:
 
         self.move_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(opts, text="Move files (don't copy)", variable=self.move_var
-                        ).grid(row=2, column=0, columnspan=3, padx=12, pady=(4, 10), sticky="w")
+                        ).grid(row=2, column=0, columnspan=2, padx=12, pady=(4, 10), sticky="w")
+        self.subfolders_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(opts, text="Sort into species subfolders", variable=self.subfolders_var
+                        ).grid(row=2, column=2, columnspan=2, padx=12, pady=(4, 10), sticky="w")
         self.dry_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(opts, text="Dry run (preview only)", variable=self.dry_var
-                        ).grid(row=2, column=3, columnspan=4, padx=12, pady=(4, 10), sticky="w")
+                        ).grid(row=2, column=4, columnspan=3, padx=12, pady=(4, 10), sticky="w")
 
         # ── Run / Cancel ──────────────────────────────────────────────────
         btn_row = ctk.CTkFrame(self.root, fg_color="transparent")
@@ -723,6 +730,7 @@ class TrailCamGUI:
                     dry_run=self.dry_var.get(),
                     verbose=False,
                     log=log,
+                    subfolders=self.subfolders_var.get(),
                     progress_callback=lambda v: self._q.put(("progress", v)),
                     status_callback=lambda s: self._q.put(("status", s)),
                     cancel_event=self._cancel_event,
@@ -768,6 +776,8 @@ def main():
                         help="US state abbreviation (e.g. VA) — only applies when country=USA")
     parser.add_argument("--move", action="store_true",
                         help="Move files instead of copying.")
+    parser.add_argument("--no-subfolders", action="store_true",
+                        help="Put all files flat in the output folder instead of species subfolders.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Preview without touching files.")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -792,6 +802,7 @@ def main():
         dry_run=args.dry_run,
         verbose=args.verbose,
         log=log,
+        subfolders=not args.no_subfolders,
     )
 
 
