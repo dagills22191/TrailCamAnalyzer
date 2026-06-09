@@ -261,7 +261,7 @@ def sort_files(
             dst = target_dir / f"{date_str}_{time_str}_{species_name}{ext}"
             i2 = 2
             while dst.exists():
-                dst = target_dir / f"{date_str}_{species_name}_{i2}{ext}"
+                dst = target_dir / f"{date_str}_{time_str}_{species_name}_{i2}{ext}"
                 i2 += 1
 
             if dry_run:
