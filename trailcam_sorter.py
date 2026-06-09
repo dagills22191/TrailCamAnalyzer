@@ -135,6 +135,21 @@ def pick_representative(files: list[Path]) -> Optional[Path]:
     return images[0]
 
 
+def score_sharpness(path: Path) -> float:
+    """Return the Laplacian variance of an image as a sharpness score.
+
+    Higher = sharper. Returns 0.0 on any read error or if cv2 is unavailable.
+    """
+    try:
+        import cv2
+        img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            return 0.0
+        return float(cv2.Laplacian(img, cv2.CV_64F).var())
+    except Exception:
+        return 0.0
+
+
 # ---------------------------------------------------------------------------
 # SpeciesNet wrapper
 # ---------------------------------------------------------------------------
