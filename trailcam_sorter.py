@@ -218,6 +218,7 @@ def sort_files(
     dry_run: bool,
     log: logging.Logger,
     subfolders: bool = True,
+    sharpness: bool = False,
     progress_callback: Optional[Callable[[float], None]] = None,
     cancel_event: Optional[threading.Event] = None,
 ) -> dict[str, int]:
@@ -276,7 +277,13 @@ def sort_files(
         time_str = f"{event_key[9:11]}-{event_key[11:13]}-{event_key[13:15]}"
         target_dir = dest_root / species_name if subfolders else dest_root
 
-        for f in files:
+        files_to_copy = (
+            [rep_map[event_key]] + [f for f in files if f.suffix.lower() in VIDEO_EXTS]
+            if sharpness and rep_map.get(event_key)
+            else files
+        )
+
+        for f in files_to_copy:
             ext = f.suffix.lower()
             dst = target_dir / f"{date_str}_{time_str}_{species_name}{ext}"
             i2 = 2
@@ -345,6 +352,7 @@ def run_sort(
     verbose: bool,
     log: logging.Logger,
     subfolders: bool = True,
+    sharpness: bool = False,
     progress_callback: Optional[Callable[[float], None]] = None,
     status_callback: Optional[Callable[[str], None]] = None,
     cancel_event: Optional[threading.Event] = None,
@@ -385,7 +393,7 @@ def run_sort(
     rep_map: dict[str, Path] = {}
     images_to_classify: list[Path] = []
     for event_key, files in events.items():
-        rep = pick_representative(files)
+        rep = pick_representative(files, use_sharpness=sharpness)
         if rep:
             rep_map[event_key] = rep
             images_to_classify.append(rep)
@@ -428,6 +436,7 @@ def run_sort(
         events, predictions, rep_map,
         dest_root, confidence, move, dry_run, log,
         subfolders=subfolders,
+        sharpness=sharpness,
         progress_callback=progress_callback,
         cancel_event=cancel_event,
     )

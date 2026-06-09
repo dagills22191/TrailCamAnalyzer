@@ -66,3 +66,85 @@ def test_pick_representative_video_only_returns_none(tmp_path):
     video = tmp_path / "20240615_083012.mp4"
     video.touch()
     assert pick_representative([video], use_sharpness=True) is None
+
+
+# --- sort_files with sharpness=True ---
+
+def test_sort_files_sharpness_copies_only_rep_and_video(tmp_path):
+    """sharpness=True: only the representative image and videos are copied."""
+    import logging
+
+    src = tmp_path / "src"
+    src.mkdir()
+    dst = tmp_path / "dst"
+    dst.mkdir()
+
+    base  = make_image(src / "20240615_083012.jpg",   blur_radius=0)
+    var1  = make_image(src / "20240615_083012_1.jpg", blur_radius=51)
+    video = src / "20240615_083012.mp4"
+    video.touch()
+
+    events  = {"20240615_083012": [base, var1, video]}
+    rep_map = {"20240615_083012": base}
+    predictions = {
+        str(base): {"prediction": "mammalia;cervidae;odocoileus virginianus", "prediction_score": 0.9}
+    }
+
+    log = logging.getLogger("test")
+    stats = sort_files(
+        events=events,
+        predictions=predictions,
+        rep_map=rep_map,
+        dest_root=dst,
+        min_confidence=0.4,
+        move=False,
+        dry_run=False,
+        log=log,
+        sharpness=True,
+    )
+
+    copied = list(dst.rglob("*"))
+    copied_names = [f.name for f in copied if f.is_file()]
+
+    assert len(copied_names) == 2
+    assert not any("_1" in name for name in copied_names)
+    assert any(name.endswith(".mp4") for name in copied_names)
+    assert sum(stats.values()) == 2
+
+
+def test_sort_files_no_sharpness_copies_all(tmp_path):
+    """sharpness=False (default): all burst files are copied as before."""
+    import logging
+
+    src = tmp_path / "src"
+    src.mkdir()
+    dst = tmp_path / "dst"
+    dst.mkdir()
+
+    base  = make_image(src / "20240615_083012.jpg",   blur_radius=0)
+    var1  = make_image(src / "20240615_083012_1.jpg", blur_radius=51)
+    video = src / "20240615_083012.mp4"
+    video.touch()
+
+    events  = {"20240615_083012": [base, var1, video]}
+    rep_map = {"20240615_083012": base}
+    predictions = {
+        str(base): {"prediction": "mammalia;cervidae;odocoileus virginianus", "prediction_score": 0.9}
+    }
+
+    log = logging.getLogger("test")
+    stats = sort_files(
+        events=events,
+        predictions=predictions,
+        rep_map=rep_map,
+        dest_root=dst,
+        min_confidence=0.4,
+        move=False,
+        dry_run=False,
+        log=log,
+        sharpness=False,
+    )
+
+    copied = [f for f in dst.rglob("*") if f.is_file()]
+    assert len(copied) == 3
+    assert sum(stats.values()) == 3
