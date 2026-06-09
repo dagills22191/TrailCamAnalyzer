@@ -36,3 +36,33 @@ def test_score_sharpness_sharp_beats_blurry(tmp_path):
     sharp = make_image(tmp_path / "sharp.jpg", blur_radius=0)
     blurry = make_image(tmp_path / "blurry.jpg", blur_radius=51)
     assert score_sharpness(sharp) > score_sharpness(blurry)
+
+
+# --- pick_representative with use_sharpness ---
+
+def test_pick_representative_sharpness_off_returns_base_image(tmp_path):
+    """Without sharpness, returns base image (no variant suffix)."""
+    base  = make_image(tmp_path / "20240615_083012.jpg")
+    var1  = make_image(tmp_path / "20240615_083012_1.jpg", blur_radius=0)
+    result = pick_representative([base, var1], use_sharpness=False)
+    assert result == base
+
+
+def test_pick_representative_sharpness_on_returns_sharpest(tmp_path):
+    """With sharpness, returns the sharpest image regardless of variant order."""
+    blurry_base = make_image(tmp_path / "20240615_083012.jpg",   blur_radius=51)
+    sharp_var   = make_image(tmp_path / "20240615_083012_1.jpg", blur_radius=0)
+    result = pick_representative([blurry_base, sharp_var], use_sharpness=True)
+    assert result == sharp_var
+
+
+def test_pick_representative_single_image_ignores_sharpness(tmp_path):
+    """Single image event: sharpness flag is irrelevant, image is returned."""
+    only = make_image(tmp_path / "20240615_083012.jpg")
+    assert pick_representative([only], use_sharpness=True) == only
+
+
+def test_pick_representative_video_only_returns_none(tmp_path):
+    video = tmp_path / "20240615_083012.mp4"
+    video.touch()
+    assert pick_representative([video], use_sharpness=True) is None

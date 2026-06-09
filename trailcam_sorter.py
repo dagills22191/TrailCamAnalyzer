@@ -116,15 +116,20 @@ def group_events(folder: Path) -> dict[str, list[Path]]:
     return dict(events)
 
 
-def pick_representative(files: list[Path]) -> Optional[Path]:
+def pick_representative(files: list[Path], use_sharpness: bool = False) -> Optional[Path]:
     """Choose the single image to classify for this event group.
 
-    Priority: base image (no variant suffix) > lowest variant number.
+    With use_sharpness=False (default): base image (no variant suffix) > lowest variant number.
+    With use_sharpness=True: returns the image with the highest Laplacian variance score.
     Returns None for video-only groups.
     """
     images = [f for f in files if f.suffix.lower() in IMAGE_EXTS]
     if not images:
         return None
+
+    if use_sharpness and len(images) > 1:
+        scored = [(score_sharpness(f), f) for f in images]
+        return max(scored, key=lambda x: x[0])[1]
 
     def sort_key(p: Path):
         m = EVENT_PATTERN.match(p.name)
