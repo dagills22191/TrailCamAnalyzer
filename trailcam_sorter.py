@@ -811,6 +811,9 @@ def main():
                         help="Move files instead of copying.")
     parser.add_argument("--no-subfolders", action="store_true",
                         help="Put all files flat in the output folder instead of species subfolders.")
+    parser.add_argument("--sharpest", action="store_true",
+                        help="Score burst images for sharpness and copy only the sharpest frame. "
+                             "Videos are always included. Default: off.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Preview without touching files.")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -836,6 +839,7 @@ def main():
         verbose=args.verbose,
         log=log,
         subfolders=not args.no_subfolders,
+        sharpness=args.sharpest,
     )
 
 
