@@ -134,6 +134,9 @@ python trailcam_sorter.py "D:/TrailCam/June2024" --report-csv "D:/TrailCam/sort-
 # Merge adjacent timestamp events that are within 30 seconds
 python trailcam_sorter.py "D:/TrailCam/June2024" --event-window-seconds 30
 
+# Skip exact duplicate files by content hash
+python trailcam_sorter.py "D:/TrailCam/June2024" --dedupe-exact
+
 # Flat output — all files in one folder, no species subfolders
 python trailcam_sorter.py "D:/TrailCam/June2024" --no-subfolders
 
@@ -170,6 +173,7 @@ optional:
   --report-csv        Optional path to write species/category counts CSV
   --event-window-seconds
                       Merge adjacent timestamp events within this many seconds (default: 0, disabled)
+  --dedupe-exact      Skip exact duplicate files based on content hash
   --dry-run           Preview without touching any files
   -v, --verbose       Debug output
 ```
@@ -251,7 +255,8 @@ Each non-dry run writes `_sort_report.json` to the output folder.
     "classified_image_events": 1357,
     "video_only_events": 607,
     "exif_derived_events": 112,
-    "mtime_derived_events": 24
+    "mtime_derived_events": 24,
+    "exact_duplicates_skipped": 31
   },
   "timings_seconds": {
     "group_events": 2.43,
@@ -270,6 +275,9 @@ Each non-dry run writes `_sort_report.json` to the output folder.
     "filename_events": 1828,
     "exif_derived_events": 112,
     "mtime_derived_events": 24
+  },
+  "duplicate_handling": {
+    "exact_duplicates_skipped": 31
   },
   "species_counts": {
     "Odocoileus Virginianus": 611,

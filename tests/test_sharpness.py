@@ -224,6 +224,45 @@ def test_sort_files_dry_run_simulates_name_collisions(tmp_path, caplog):
     assert "_3.jpg" in messages
 
 
+def test_sort_files_dedupe_exact_skips_identical_content(tmp_path):
+    import logging
+
+    src = tmp_path / "src"
+    src.mkdir()
+    dst = tmp_path / "dst"
+    dst.mkdir()
+
+    base = make_image(src / "20240615_083012.jpg")
+    dup = src / "20240615_083012_1.jpg"
+    dup.write_bytes(base.read_bytes())
+
+    events = {"20240615_083012": [base, dup]}
+    rep_map = {"20240615_083012": base}
+    predictions = {
+        str(base): {"prediction": "mammalia;cervidae;odocoileus virginianus", "prediction_score": 0.9}
+    }
+
+    dedupe_stats: dict[str, int] = {}
+    stats = sort_files(
+        events=events,
+        predictions=predictions,
+        rep_map=rep_map,
+        dest_root=dst,
+        min_confidence=0.4,
+        move=False,
+        dry_run=False,
+        log=logging.getLogger("test"),
+        sharpness=False,
+        dedupe_exact=True,
+        dedupe_stats=dedupe_stats,
+    )
+
+    copied = [f for f in dst.rglob("*") if f.is_file()]
+    assert len(copied) == 1
+    assert sum(stats.values()) == 1
+    assert dedupe_stats["exact_duplicates_skipped"] == 1
+
+
 def test_video_only_event_matches_nearest_classified_event(tmp_path):
     """Video-only events should match nearest classified image event, not minute bucket order."""
     import logging
@@ -610,6 +649,7 @@ def test_run_result_dataclass_defaults_paths_none():
         event_key_sources={},
     )
 
+    assert result.exact_duplicates_skipped == 0
     assert result.report_path is None
     assert result.csv_report_path is None
 

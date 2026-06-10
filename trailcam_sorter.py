@@ -23,6 +23,7 @@ warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
 
 import argparse
 import csv
+import hashlib
 import json
 import logging
 import queue
@@ -420,8 +421,24 @@ class RunResult:
     phase_timings: dict[str, float]
     video_matching: dict[str, int]
     event_key_sources: dict[str, int]
+    exact_duplicates_skipped: int = 0
     report_path: Optional[Path] = None
     csv_report_path: Optional[Path] = None
+
+
+def compute_file_sha256(path: Path, chunk_size: int = 1024 * 1024) -> Optional[str]:
+    """Compute SHA256 for exact duplicate detection; returns None on read failure."""
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        return digest.hexdigest()
+    except Exception:
+        return None
 
 
 def sort_files(
@@ -435,10 +452,12 @@ def sort_files(
     log: logging.Logger,
     subfolders: bool = True,
     sharpness: bool = False,
+    dedupe_exact: bool = False,
     video_match_mode: Literal["nearest", "minute"] = "nearest",
     progress_callback: Optional[Callable[[float], None]] = None,
     cancel_event: Optional[threading.Event] = None,
     video_match_stats: Optional[dict[str, int]] = None,
+    dedupe_stats: Optional[dict[str, int]] = None,
 ) -> dict[str, int]:
     """Copy/move files into species subfolders, renamed to yyyy-mm-dd_HH-MM-SS_species.ext.
 
@@ -458,6 +477,8 @@ def sort_files(
     action = shutil.move if move else shutil.copy2
     verb = "MOVE" if move else "COPY"
     reserved_destinations: set[str] = set()
+    seen_hashes: set[str] = set()
+    duplicates_skipped = 0
 
     # Build candidates for video-only matching from confidently classified image events.
     minute_species: dict[str, str] = {}
@@ -550,6 +571,15 @@ def sort_files(
         )
 
         for f in files_to_copy:
+            if dedupe_exact:
+                digest = compute_file_sha256(f)
+                if digest:
+                    if digest in seen_hashes:
+                        duplicates_skipped += 1
+                        log.debug("Skipping exact duplicate: %s", f.name)
+                        continue
+                    seen_hashes.add(digest)
+
             ext = f.suffix.lower()
             stem = f"{date_str}_{time_str}_{species_name}"
             dst = target_dir / f"{stem}{ext}"
@@ -571,6 +601,9 @@ def sort_files(
     if video_match_stats is not None:
         video_match_stats.clear()
         video_match_stats.update(local_video_match_stats)
+    if dedupe_stats is not None:
+        dedupe_stats.clear()
+        dedupe_stats.update({"exact_duplicates_skipped": duplicates_skipped})
 
     return dict(stats)
 
@@ -589,6 +622,7 @@ def write_report(
     phase_timings: Optional[dict[str, float]] = None,
     video_match_stats: Optional[dict[str, int]] = None,
     grouping_source_stats: Optional[dict[str, int]] = None,
+    dedupe_stats: Optional[dict[str, int]] = None,
 ):
     video_only_events = (
         video_match_stats.get("video_only_events", 0)
@@ -607,6 +641,7 @@ def write_report(
             "video_only_events": video_only_events,
             "exif_derived_events": exif_events,
             "mtime_derived_events": mtime_events,
+            "exact_duplicates_skipped": dedupe_stats.get("exact_duplicates_skipped", 0) if dedupe_stats else 0,
         },
         "timings_seconds": phase_timings or {},
         "video_matching": video_match_stats or {
@@ -620,6 +655,7 @@ def write_report(
             "exif_derived_events": 0,
             "mtime_derived_events": 0,
         },
+        "duplicate_handling": dedupe_stats or {"exact_duplicates_skipped": 0},
         "species_counts": dict(sorted(stats.items(), key=lambda x: -x[1])),
         "event_details": [],
     }
@@ -678,6 +714,7 @@ def run_sort(
     subfolders: bool = True,
     sharpness: bool = False,
     classifier_backend: str = "speciesnet",
+    dedupe_exact: bool = False,
     video_match_mode: Literal["nearest", "minute"] = "nearest",
     use_exif_timestamps: bool = True,
     recursive: bool = True,
@@ -706,6 +743,7 @@ def run_sort(
     log.info("Output : %s", dest_root)
     log.info("Mode   : %s", "MOVE" if move else "COPY")
     log.info("Classifier backend: %s", classifier_backend)
+    log.info("Exact dedupe: %s", "enabled" if dedupe_exact else "disabled")
     log.info("Video match mode: %s", video_match_mode)
     if use_exif_timestamps:
         log.info("EXIF fallback: enabled (for images without timestamp-style filenames)")
@@ -876,15 +914,18 @@ def run_sort(
     status("Copying files…" if not dry_run else "Previewing (dry run)…")
     sort_start = time.perf_counter()
     video_match_stats: dict[str, int] = {}
+    dedupe_stats: dict[str, int] = {}
     stats = sort_files(
         events, predictions, rep_map,
         dest_root, confidence, move, dry_run, log,
         subfolders=subfolders,
         sharpness=sharpness,
+        dedupe_exact=dedupe_exact,
         video_match_mode=video_match_mode,
         progress_callback=progress_callback,
         cancel_event=cancel_event,
         video_match_stats=video_match_stats,
+        dedupe_stats=dedupe_stats,
     )
     phase_timings["sort_files"] = time.perf_counter() - sort_start
     phase_timings["total_pipeline"] = time.perf_counter() - run_start
@@ -911,6 +952,7 @@ def run_sort(
             phase_timings=phase_timings,
             video_match_stats=video_match_stats,
             grouping_source_stats=grouping_source_stats,
+            dedupe_stats=dedupe_stats,
         )
         if report_csv is not None:
             csv_report_path = write_species_csv(
@@ -942,6 +984,7 @@ def run_sort(
         grouping_source_stats.get("mtime_derived_events", 0),
         video_match_stats.get("video_unmatched", 0),
     )
+    log.info("Duplicates skipped (exact hash): %d", dedupe_stats.get("exact_duplicates_skipped", 0))
     log.info(
         "TIMINGS (s) | group=%.2f load=%.2f inference=%.2f sort=%.2f total=%.2f",
         phase_timings.get("group_events", 0.0),
@@ -970,6 +1013,7 @@ def run_sort(
         phase_timings=phase_timings,
         video_matching=video_match_stats,
         event_key_sources=grouping_source_stats,
+        exact_duplicates_skipped=dedupe_stats.get("exact_duplicates_skipped", 0),
         report_path=report_path,
         csv_report_path=csv_report_path,
     )
@@ -1375,6 +1419,7 @@ class TrailCamGUI:
                     subfolders=self.subfolders_var.get(),
                     sharpness=self.sharpness_var.get(),
                     classifier_backend="speciesnet",
+                    dedupe_exact=False,
                     recursive=self.recursive_var.get(),
                     use_exif_timestamps=self.exif_var.get(),
                     event_window_seconds=0,
@@ -1449,6 +1494,8 @@ def main():
                         help="Advanced: disable fallback and require strict timestamp-style filenames only.")
     parser.add_argument("--report-csv", default=None,
                         help="Optional path to write species/category counts CSV.")
+    parser.add_argument("--dedupe-exact", action="store_true",
+                        help="Skip exact duplicate files based on content hash.")
     parser.add_argument("--event-window-seconds", type=int, default=0,
                         help="Merge adjacent timestamp events within this gap in seconds (default: 0, disabled).")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -1498,6 +1545,7 @@ def main():
         subfolders=not args.no_subfolders,
         sharpness=args.sharpest,
         classifier_backend=args.classifier_backend,
+        dedupe_exact=args.dedupe_exact,
         video_match_mode=args.video_match_mode,
         use_exif_timestamps=args.use_exif_timestamps,
         recursive=not args.no_recursive,
