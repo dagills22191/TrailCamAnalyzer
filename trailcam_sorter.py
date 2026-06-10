@@ -101,13 +101,14 @@ def sanitize_label(label: str) -> str:
     return name.strip().title() if name else "Unknown"
 
 
-def group_events(folder: Path) -> dict[str, list[Path]]:
+def group_events(folder: Path, recursive: bool = True) -> dict[str, list[Path]]:
     """Group files by their base timestamp (the 'event key').
 
     Returns {event_key: [file1, file2, ...]} where event_key = "20240615_083012".
     """
     events: dict[str, list[Path]] = defaultdict(list)
-    for f in sorted(folder.rglob("*")):
+    scan = folder.rglob("*") if recursive else folder.glob("*")
+    for f in sorted(scan):
         if not f.is_file():
             continue
         m = EVENT_PATTERN.match(f.name)
@@ -353,6 +354,7 @@ def run_sort(
     log: logging.Logger,
     subfolders: bool = True,
     sharpness: bool = False,
+    recursive: bool = True,
     progress_callback: Optional[Callable[[float], None]] = None,
     status_callback: Optional[Callable[[str], None]] = None,
     cancel_event: Optional[threading.Event] = None,
@@ -378,7 +380,7 @@ def run_sort(
     # 1. Group files by event
     check()
     status("Scanning files…")
-    events = group_events(source)
+    events = group_events(source, recursive=recursive)
     if not events:
         log.warning("No matching files found in %s", source)
         return
@@ -486,13 +488,14 @@ class TrailCamGUI:
 
         self.root = ctk.CTk()
         self.root.title("TrailCam Sorter")
-        self.root.geometry("760x720")
+        self.root.geometry("820x790")
         self.root.resizable(True, True)
-        self.root.minsize(640, 580)
+        self.root.minsize(680, 580)
+        self.root.configure(fg_color="#161c24")
 
         self._q: queue.Queue = queue.Queue()
         self._running = False
-        self._busy = False        # True during model load + inference (animate bar)
+        self._busy = False
         self._anim_tick = 0.0
         self._cancel_event = threading.Event()
 
@@ -500,161 +503,251 @@ class TrailCamGUI:
 
     def _build_ui(self):
         ctk = self.ctk
-        pad = {"padx": 16, "pady": 5}
 
-        # ── Header ────────────────────────────────────────────────────────
-        header = ctk.CTkFrame(self.root, corner_radius=0, fg_color=("#1a6fa8", "#0d4f7a"))
-        header.pack(fill="x")
+        BG       = "#161c24"
+        CARD     = "#1e2736"
+        INNER    = "#232f40"
+        HDR      = "#0d1a10"
+        GREEN    = "#2d7d52"
+        GREEN_H  = "#37965f"
+        CANCEL   = "#7a2222"
+        CANCEL_H = "#5a1818"
+        CLOSE_H  = "#2d3d50"
+        TEXT     = "#c8d8e8"
+        DIM      = "#6a8090"
+        MUTED    = "#4a6070"
+        SEP      = "#2a3a4a"
+
+        def section_header(text: str):
+            row = ctk.CTkFrame(self.root, fg_color="transparent")
+            row.pack(fill="x", padx=16, pady=(10, 0))
+            ctk.CTkLabel(
+                row, text=text,
+                font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
+                text_color=MUTED,
+            ).pack(side="left")
+            ctk.CTkFrame(row, height=1, fg_color=SEP).pack(
+                side="left", fill="x", expand=True, padx=(8, 0)
+            )
+
+        # ── Header ───────────────────────────────────────────────────────
+        hdr = ctk.CTkFrame(self.root, corner_radius=0, fg_color=HDR)
+        hdr.pack(fill="x")
+        hdr_inner = ctk.CTkFrame(hdr, fg_color="transparent")
+        hdr_inner.pack(fill="x", padx=20, pady=(16, 14))
         ctk.CTkLabel(
-            header,
+            hdr_inner,
             text="TrailCam Sorter",
-            font=ctk.CTkFont(size=24, weight="bold"),
-            text_color="white",
-        ).pack(side="left", padx=20, pady=(14, 4))
+            font=ctk.CTkFont(family="Segoe UI", size=22, weight="bold"),
+            text_color="#c8e8d0",
+        ).pack(side="left")
         ctk.CTkLabel(
-            header,
-            text="AI-powered species identification using Google SpeciesNet",
-            font=ctk.CTkFont(size=12),
-            text_color="#b0d4f0",
-        ).pack(side="left", padx=(0, 20), pady=(18, 4))
+            hdr_inner,
+            text="  ·  AI-powered species identification via Google SpeciesNet",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color="#3a6050",
+        ).pack(side="left", pady=(3, 0))
 
-        # ── Folders ───────────────────────────────────────────────────────
-        folders = ctk.CTkFrame(self.root)
-        folders.pack(fill="x", **pad)
+        # ── Folders ──────────────────────────────────────────────────────
+        section_header("INPUT / OUTPUT")
+        folders = ctk.CTkFrame(self.root, fg_color=CARD, corner_radius=8)
+        folders.pack(fill="x", padx=16, pady=(6, 0))
         folders.columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(folders, text="Source folder:", anchor="w", width=100
-                     ).grid(row=0, column=0, padx=(12, 6), pady=(10, 4), sticky="w")
+        ctk.CTkLabel(
+            folders, text="Source",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            text_color=DIM, width=64, anchor="w",
+        ).grid(row=0, column=0, padx=(16, 6), pady=(16, 6), sticky="w")
         self.src_var = ctk.StringVar()
-        ctk.CTkEntry(folders, textvariable=self.src_var, placeholder_text="Select the folder containing trail-cam files…"
-                     ).grid(row=0, column=1, padx=4, pady=(10, 4), sticky="ew")
-        ctk.CTkButton(folders, text="Browse", width=80,
-                      command=lambda: self._browse(self.src_var, "Select trail-cam folder")
-                      ).grid(row=0, column=2, padx=(4, 12), pady=(10, 4))
+        ctk.CTkEntry(
+            folders, textvariable=self.src_var,
+            placeholder_text="Select the folder containing trail-cam files…",
+            fg_color=INNER, border_color=SEP, border_width=1,
+        ).grid(row=0, column=1, padx=4, pady=(16, 6), sticky="ew")
+        ctk.CTkButton(
+            folders, text="Browse", width=80,
+            fg_color=INNER, hover_color=CLOSE_H,
+            border_width=1, border_color=SEP,
+            font=ctk.CTkFont(size=12), text_color=DIM,
+            command=lambda: self._browse(self.src_var, "Select trail-cam folder"),
+        ).grid(row=0, column=2, padx=(4, 16), pady=(16, 6))
 
-        ctk.CTkLabel(folders, text="Output folder:", anchor="w", width=100
-                     ).grid(row=1, column=0, padx=(12, 6), pady=(4, 10), sticky="w")
+        ctk.CTkLabel(
+            folders, text="Output",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            text_color=DIM, width=64, anchor="w",
+        ).grid(row=1, column=0, padx=(16, 6), pady=(6, 16), sticky="w")
         default_out = load_config().get("last_output", str(Path.home() / "TrailCamAnimals"))
         self.out_var = ctk.StringVar(value=default_out)
-        ctk.CTkEntry(folders, textvariable=self.out_var
-                     ).grid(row=1, column=1, padx=4, pady=(4, 10), sticky="ew")
-        ctk.CTkButton(folders, text="Browse", width=80,
-                      command=lambda: self._browse(self.out_var, "Select output folder")
-                      ).grid(row=1, column=2, padx=(4, 12), pady=(4, 10))
+        ctk.CTkEntry(
+            folders, textvariable=self.out_var,
+            fg_color=INNER, border_color=SEP, border_width=1,
+        ).grid(row=1, column=1, padx=4, pady=(6, 16), sticky="ew")
+        ctk.CTkButton(
+            folders, text="Browse", width=80,
+            fg_color=INNER, hover_color=CLOSE_H,
+            border_width=1, border_color=SEP,
+            font=ctk.CTkFont(size=12), text_color=DIM,
+            command=lambda: self._browse(self.out_var, "Select output folder"),
+        ).grid(row=1, column=2, padx=(4, 16), pady=(6, 16))
 
-        # ── Options ───────────────────────────────────────────────────────
-        opts = ctk.CTkFrame(self.root)
-        opts.pack(fill="x", **pad)
+        # ── Options ──────────────────────────────────────────────────────
+        section_header("OPTIONS")
+        opts = ctk.CTkFrame(self.root, fg_color=CARD, corner_radius=8)
+        opts.pack(fill="x", padx=16, pady=(6, 0))
 
-        ctk.CTkLabel(opts, text="Country:").grid(row=0, column=0, padx=(12, 4), pady=(10, 4), sticky="e")
+        geo_row = ctk.CTkFrame(opts, fg_color="transparent")
+        geo_row.pack(fill="x", padx=16, pady=(14, 4))
+
+        ctk.CTkLabel(geo_row, text="Country",
+                     font=ctk.CTkFont(size=11), text_color=DIM).pack(side="left", padx=(0, 6))
         self.country_var = ctk.StringVar(value="")
         self.country_combo = ctk.CTkComboBox(
-            opts, variable=self.country_var, width=100,
-            values=COUNTRY_CODES,
+            geo_row, variable=self.country_var, width=96, values=COUNTRY_CODES,
+            fg_color=INNER, border_color=SEP, button_color=SEP, button_hover_color=CLOSE_H,
+            dropdown_fg_color=INNER, dropdown_hover_color=CLOSE_H, dropdown_text_color=TEXT,
             command=self._on_country_change,
         )
-        self.country_combo.grid(row=0, column=1, padx=(0, 12), pady=(10, 4), sticky="w")
+        self.country_combo.pack(side="left", padx=(0, 20))
 
-        ctk.CTkLabel(opts, text="Region (US):").grid(row=0, column=2, padx=(4, 4), pady=(10, 4), sticky="e")
+        ctk.CTkLabel(geo_row, text="Region (US)",
+                     font=ctk.CTkFont(size=11), text_color=DIM).pack(side="left", padx=(0, 6))
         self.region_var = ctk.StringVar(value="")
         self.region_combo = ctk.CTkComboBox(
-            opts, variable=self.region_var, width=90,
-            values=US_STATES,
-            state="disabled",
+            geo_row, variable=self.region_var, width=86, values=US_STATES, state="disabled",
+            fg_color=INNER, border_color=SEP, button_color=SEP, button_hover_color=CLOSE_H,
+            dropdown_fg_color=INNER, dropdown_hover_color=CLOSE_H, dropdown_text_color=TEXT,
         )
-        self.region_combo.grid(row=0, column=3, padx=(0, 12), pady=(10, 4), sticky="w")
+        self.region_combo.pack(side="left", padx=(0, 28))
 
-        ctk.CTkLabel(opts, text="Min confidence:").grid(row=0, column=4, padx=(4, 4), pady=(10, 4), sticky="e")
+        ctk.CTkLabel(geo_row, text="Confidence",
+                     font=ctk.CTkFont(size=11), text_color=DIM).pack(side="left", padx=(0, 8))
         self.conf_var = ctk.DoubleVar(value=0.4)
-        self.conf_label = ctk.CTkLabel(opts, text="0.40", width=38,
-                                       font=ctk.CTkFont(weight="bold"))
-        ctk.CTkSlider(opts, from_=0.1, to=0.9, number_of_steps=16,
-                      variable=self.conf_var, width=130,
-                      command=lambda v: self.conf_label.configure(text=f"{float(v):.2f}")
-                      ).grid(row=0, column=5, padx=4, pady=(10, 4))
-        self.conf_label.grid(row=0, column=6, padx=(0, 12), pady=(10, 4), sticky="w")
+        ctk.CTkSlider(
+            geo_row, from_=0.1, to=0.9, number_of_steps=16,
+            variable=self.conf_var, width=140,
+            button_color=GREEN, button_hover_color=GREEN_H, progress_color=GREEN,
+            fg_color=INNER,
+            command=lambda v: self.conf_label.configure(text=f"{float(v):.2f}"),
+        ).pack(side="left")
+        self.conf_label = ctk.CTkLabel(
+            geo_row, text="0.40", width=40,
+            font=ctk.CTkFont(size=12, weight="bold"), text_color=TEXT,
+        )
+        self.conf_label.pack(side="left", padx=(6, 0))
 
         ctk.CTkLabel(
             opts,
-            text="Optional — geofencing is safe to use with correct codes. Region applies to USA only.",
-            font=ctk.CTkFont(size=10),
-            text_color="#7a9ab8",
-            anchor="w",
-        ).grid(row=1, column=0, columnspan=4, padx=(12, 4), pady=(0, 4), sticky="w")
-        ctk.CTkLabel(
-            opts,
-            text="0.4 default · lower = more results · higher = fewer, more certain",
-            font=ctk.CTkFont(size=10),
-            text_color="#7a9ab8",
-            anchor="w",
-        ).grid(row=1, column=4, columnspan=3, padx=(4, 12), pady=(0, 4), sticky="w")
+            text="Geofencing optional · Region for USA only  ·  "
+                 "Confidence: 0.4 default, lower = more results, higher = more certain",
+            font=ctk.CTkFont(size=10), text_color=MUTED, anchor="w",
+        ).pack(fill="x", padx=16, pady=(0, 8))
+
+        ctk.CTkFrame(opts, height=1, fg_color=SEP).pack(fill="x", padx=12, pady=(0, 10))
+
+        chk_row = ctk.CTkFrame(opts, fg_color="transparent")
+        chk_row.pack(fill="x", padx=16, pady=(0, 14))
+
+        self.recursive_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            chk_row, text="Scan subfolders", variable=self.recursive_var,
+            fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
+        ).pack(side="left", padx=(0, 22))
 
         self.move_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(opts, text="Move files (don't copy)", variable=self.move_var
-                        ).grid(row=2, column=0, columnspan=2, padx=12, pady=(4, 10), sticky="w")
-        self.subfolders_var = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(opts, text="Sort into species subfolders", variable=self.subfolders_var
-                        ).grid(row=2, column=2, columnspan=2, padx=12, pady=(4, 10), sticky="w")
-        self.dry_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(opts, text="Dry run (preview only)", variable=self.dry_var
-                        ).grid(row=2, column=4, columnspan=3, padx=12, pady=(4, 10), sticky="w")
-        self.sharpness_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(opts, text="Pick sharpest frame (blur detection)", variable=self.sharpness_var
-                        ).grid(row=3, column=0, columnspan=4, padx=12, pady=(0, 10), sticky="w")
+        ctk.CTkCheckBox(
+            chk_row, text="Move files", variable=self.move_var,
+            fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
+        ).pack(side="left", padx=(0, 22))
 
-        # ── Run / Cancel ──────────────────────────────────────────────────
-        btn_row = ctk.CTkFrame(self.root, fg_color="transparent")
-        btn_row.pack(fill="x", padx=16, pady=5)
+        self.subfolders_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            chk_row, text="Species subfolders", variable=self.subfolders_var,
+            fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
+        ).pack(side="left", padx=(0, 22))
+
+        self.dry_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            chk_row, text="Dry run", variable=self.dry_var,
+            fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
+        ).pack(side="left", padx=(0, 22))
+
+        self.sharpness_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            chk_row, text="Pick sharpest frame", variable=self.sharpness_var,
+            fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
+        ).pack(side="left")
+
+        # ── Run controls ─────────────────────────────────────────────────
+        section_header("RUN")
+        run_card = ctk.CTkFrame(self.root, fg_color=CARD, corner_radius=8)
+        run_card.pack(fill="x", padx=16, pady=(6, 0))
+
+        btn_row = ctk.CTkFrame(run_card, fg_color="transparent")
+        btn_row.pack(fill="x", padx=14, pady=(14, 8))
         btn_row.columnconfigure(0, weight=1)
 
         self.run_btn = ctk.CTkButton(
-            btn_row, text="Run", height=44,
-            font=ctk.CTkFont(size=15, weight="bold"),
+            btn_row, text="▶  Run Sort", height=44,
+            font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
+            fg_color=GREEN, hover_color=GREEN_H, text_color="white",
             command=self._on_run,
         )
-        self.run_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.run_btn.grid(row=0, column=0, sticky="ew", padx=(0, 8))
 
         self.cancel_btn = ctk.CTkButton(
             btn_row, text="Cancel", height=44, width=100,
-            fg_color="#8b1a1a", hover_color="#6b1212",
-            font=ctk.CTkFont(size=13),
-            state="disabled",
+            fg_color=CANCEL, hover_color=CANCEL_H,
+            font=ctk.CTkFont(size=13), state="disabled",
             command=self._on_cancel,
         )
-        self.cancel_btn.grid(row=0, column=1, sticky="ew", padx=(6, 6))
+        self.cancel_btn.grid(row=0, column=1, padx=(0, 8))
 
         self.close_btn = ctk.CTkButton(
-            btn_row, text="Close", height=44, width=90,
-            fg_color="#2b2b2b", hover_color="#3a3a3a",
-            font=ctk.CTkFont(size=13),
+            btn_row, text="Close", height=44, width=86,
+            fg_color=INNER, hover_color=CLOSE_H,
+            border_width=1, border_color=SEP,
+            font=ctk.CTkFont(size=13), text_color=DIM,
             command=self.root.destroy,
         )
-        self.close_btn.grid(row=0, column=2, sticky="ew")
+        self.close_btn.grid(row=0, column=2)
 
-        # ── Progress ──────────────────────────────────────────────────────
-        prog_row = ctk.CTkFrame(self.root, fg_color="transparent")
-        prog_row.pack(fill="x", padx=16, pady=(2, 4))
+        prog_row = ctk.CTkFrame(run_card, fg_color="transparent")
+        prog_row.pack(fill="x", padx=14, pady=(0, 6))
         prog_row.columnconfigure(0, weight=1)
 
-        self.progress = ctk.CTkProgressBar(prog_row, height=16)
+        self.progress = ctk.CTkProgressBar(
+            prog_row, height=8,
+            fg_color=INNER, progress_color=GREEN,
+        )
         self.progress.grid(row=0, column=0, sticky="ew", padx=(0, 10))
         self.progress.set(0)
 
-        self.pct_label = ctk.CTkLabel(prog_row, text="", width=42,
-                                      font=ctk.CTkFont(size=12, weight="bold"))
+        self.pct_label = ctk.CTkLabel(
+            prog_row, text="", width=42,
+            font=ctk.CTkFont(size=12, weight="bold"), text_color=TEXT,
+        )
         self.pct_label.grid(row=0, column=1)
 
-        self.status_label = ctk.CTkLabel(self.root, text="",
-                                         font=ctk.CTkFont(size=12),
-                                         text_color="#8ab4d4")
-        self.status_label.pack(anchor="w", padx=18, pady=(0, 4))
+        self.status_label = ctk.CTkLabel(
+            run_card, text="",
+            font=ctk.CTkFont(size=11), text_color=DIM, anchor="w",
+        )
+        self.status_label.pack(anchor="w", padx=14, pady=(2, 12))
 
-        # ── Log ───────────────────────────────────────────────────────────
+        # ── Activity log ─────────────────────────────────────────────────
+        section_header("ACTIVITY LOG")
         self.log_box = ctk.CTkTextbox(
             self.root,
-            font=ctk.CTkFont(family="Courier New", size=11),
+            font=ctk.CTkFont(family="Consolas", size=11),
+            fg_color=CARD,
+            text_color="#6aab85",
+            border_color=SEP, border_width=1,
+            scrollbar_button_color=SEP,
+            scrollbar_button_hover_color=GREEN,
         )
-        self.log_box.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+        self.log_box.pack(fill="both", expand=True, padx=16, pady=(6, 16))
 
     def _on_country_change(self, value: str):
         if value == "USA":
@@ -764,6 +857,7 @@ class TrailCamGUI:
                     log=log,
                     subfolders=self.subfolders_var.get(),
                     sharpness=self.sharpness_var.get(),
+                    recursive=self.recursive_var.get(),
                     progress_callback=lambda v: self._q.put(("progress", v)),
                     status_callback=lambda s: self._q.put(("status", s)),
                     cancel_event=self._cancel_event,
@@ -811,6 +905,8 @@ def main():
                         help="Move files instead of copying.")
     parser.add_argument("--no-subfolders", action="store_true",
                         help="Put all files flat in the output folder instead of species subfolders.")
+    parser.add_argument("--no-recursive", action="store_true",
+                        help="Scan only the top-level source folder; ignore subfolders.")
     parser.add_argument("--sharpest", action="store_true",
                         help="Score burst images for sharpness and copy only the sharpest frame. "
                              "Videos are always included. Default: off.")
@@ -840,6 +936,7 @@ def main():
         log=log,
         subfolders=not args.no_subfolders,
         sharpness=args.sharpest,
+        recursive=not args.no_recursive,
     )
 
 
