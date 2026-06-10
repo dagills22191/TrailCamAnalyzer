@@ -11,7 +11,10 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from trailcam_sorter import (
     CONFIDENCE_PROFILES,
+    classify_with_backend,
     group_events,
+    load_classifier_backend,
+    merge_events_within_window,
     pick_representative,
     RunResult,
     resolve_confidence_threshold,
@@ -619,3 +622,63 @@ def test_resolve_confidence_threshold_uses_profile_when_value_missing():
 
 def test_resolve_confidence_threshold_explicit_value_wins():
     assert resolve_confidence_threshold(0.33, "conservative") == 0.33
+
+
+def test_backend_wrapper_rejects_unknown_backend(tmp_path):
+    import logging
+    import pytest
+
+    with pytest.raises(ValueError):
+        load_classifier_backend("unknown-backend", logging.getLogger("test"))
+
+    with pytest.raises(ValueError):
+        classify_with_backend(
+            "unknown-backend",
+            model=None,
+            image_paths=[],
+            country=None,
+            region=None,
+            log=logging.getLogger("test"),
+        )
+
+
+def test_merge_events_within_window_disabled_returns_original(tmp_path):
+    img1 = make_image(tmp_path / "20240615_083000.jpg")
+    img2 = make_image(tmp_path / "20240615_083020.jpg")
+    events = {
+        "20240615_083000": [img1],
+        "20240615_083020": [img2],
+    }
+    source_map = {
+        "20240615_083000": {"filename"},
+        "20240615_083020": {"filename"},
+    }
+
+    merged, merged_sources = merge_events_within_window(events, source_map, event_window_seconds=0)
+
+    assert merged == events
+    assert merged_sources == source_map
+
+
+def test_merge_events_within_window_merges_adjacent_keys(tmp_path):
+    img1 = make_image(tmp_path / "20240615_083000.jpg")
+    img2 = make_image(tmp_path / "20240615_083020.jpg")
+    img3 = make_image(tmp_path / "20240615_083300.jpg")
+
+    events = {
+        "20240615_083000": [img1],
+        "20240615_083020": [img2],
+        "20240615_083300": [img3],
+    }
+    source_map = {
+        "20240615_083000": {"filename"},
+        "20240615_083020": {"exif"},
+        "20240615_083300": {"mtime"},
+    }
+
+    merged, merged_sources = merge_events_within_window(events, source_map, event_window_seconds=30)
+
+    assert set(merged.keys()) == {"20240615_083000", "20240615_083300"}
+    assert len(merged["20240615_083000"]) == 2
+    assert merged_sources is not None
+    assert merged_sources["20240615_083000"] == {"filename", "exif"}

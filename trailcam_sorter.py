@@ -60,6 +60,7 @@ VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv"}
 ALL_EXTS = IMAGE_EXTS | VIDEO_EXTS
 VIDEO_MATCH_MAX_GAP_SECONDS = 60
 VIDEO_MATCH_MODES = ("nearest", "minute")
+CLASSIFIER_BACKENDS = ("speciesnet",)
 EXIF_DATETIME_TAGS = ("DateTimeOriginal", "DateTimeDigitized", "DateTime")
 EVENT_KEY_SOURCE_FILENAME = "filename"
 EVENT_KEY_SOURCE_EXIF = "exif"
@@ -203,6 +204,67 @@ def group_events(
     return dict(events)
 
 
+def merge_events_within_window(
+    events: dict[str, list[Path]],
+    event_source_map: Optional[dict[str, set[str]]] = None,
+    event_window_seconds: int = 0,
+) -> tuple[dict[str, list[Path]], Optional[dict[str, set[str]]]]:
+    """Merge adjacent events when timestamp gaps are within a configured window.
+
+    The merged event key remains the earliest key in the cluster.
+    """
+    if event_window_seconds <= 0 or len(events) <= 1:
+        return events, event_source_map
+
+    keyed: list[tuple[str, datetime]] = []
+    passthrough: dict[str, list[Path]] = {}
+    for key, files in events.items():
+        ts = parse_event_key_timestamp(key)
+        if ts is None:
+            passthrough[key] = files
+        else:
+            keyed.append((key, ts))
+
+    if not keyed:
+        return events, event_source_map
+
+    keyed.sort(key=lambda item: item[1])
+    merged_events: dict[str, list[Path]] = {}
+    merged_sources: Optional[dict[str, set[str]]] = {} if event_source_map is not None else None
+
+    current_key, last_ts = keyed[0]
+    current_files = list(events[current_key])
+    current_sources = set(event_source_map.get(current_key, set())) if event_source_map is not None else set()
+
+    for key, ts in keyed[1:]:
+        gap = (ts - last_ts).total_seconds()
+        if gap <= event_window_seconds:
+            current_files.extend(events[key])
+            if event_source_map is not None:
+                current_sources.update(event_source_map.get(key, set()))
+            last_ts = ts
+            continue
+
+        merged_events[current_key] = current_files
+        if merged_sources is not None:
+            merged_sources[current_key] = set(current_sources)
+
+        current_key, last_ts = key, ts
+        current_files = list(events[key])
+        current_sources = set(event_source_map.get(key, set())) if event_source_map is not None else set()
+
+    merged_events[current_key] = current_files
+    if merged_sources is not None:
+        merged_sources[current_key] = set(current_sources)
+
+    for key, files in passthrough.items():
+        merged_events[key] = files
+        if merged_sources is not None and event_source_map is not None:
+            merged_sources[key] = set(event_source_map.get(key, set()))
+
+    return merged_events, merged_sources
+
+
 def pick_representative(files: list[Path], use_sharpness: bool = False) -> Optional[Path]:
     """Choose the single image to classify for this event group.
 
@@ -312,6 +374,27 @@ def classify_images(
     for pred in results.get("predictions", []):
         lookup[pred["filepath"]] = pred
     return lookup
+
+
+def load_classifier_backend(backend: str, log: logging.Logger):
+    """Load the configured classifier backend."""
+    if backend == "speciesnet":
+        return load_model(log)
+    raise ValueError(f"Unsupported classifier backend: {backend}")
+
+
+def classify_with_backend(
+    backend: str,
+    model,
+    image_paths: list[Path],
+    country: Optional[str],
+    region: Optional[str],
+    log: logging.Logger,
+) -> dict[str, dict]:
+    """Dispatch classification to the configured backend implementation."""
+    if backend == "speciesnet":
+        return classify_images(model, image_paths, country, region, log)
+    raise ValueError(f"Unsupported classifier backend: {backend}")
 
 
 # ---------------------------------------------------------------------------
@@ -594,9 +677,11 @@ def run_sort(
     log: logging.Logger,
     subfolders: bool = True,
     sharpness: bool = False,
+    classifier_backend: str = "speciesnet",
     video_match_mode: Literal["nearest", "minute"] = "nearest",
     use_exif_timestamps: bool = True,
     recursive: bool = True,
+    event_window_seconds: int = 0,
     report_csv: Optional[Path] = None,
     progress_callback: Optional[Callable[[float], None]] = None,
     status_callback: Optional[Callable[[str], None]] = None,
@@ -620,6 +705,7 @@ def run_sort(
     log.info("Source : %s", source)
     log.info("Output : %s", dest_root)
     log.info("Mode   : %s", "MOVE" if move else "COPY")
+    log.info("Classifier backend: %s", classifier_backend)
     log.info("Video match mode: %s", video_match_mode)
     if use_exif_timestamps:
         log.info("EXIF fallback: enabled (for images without timestamp-style filenames)")
@@ -642,6 +728,13 @@ def run_sort(
         use_exif_timestamps=use_exif_timestamps,
         event_source_map=event_source_map,
     )
+    events, merged_sources = merge_events_within_window(
+        events,
+        event_source_map=event_source_map,
+        event_window_seconds=event_window_seconds,
+    )
+    if merged_sources is not None:
+        event_source_map = merged_sources
     phase_timings["group_events"] = time.perf_counter() - group_start
     total_files = sum(len(v) for v in events.values())
     if not events:
@@ -691,6 +784,8 @@ def run_sort(
     }
 
     log.info("Found %d events encompassing %d files", len(events), total_files)
+    if event_window_seconds > 0:
+        log.info("Event merge window: %d second(s)", event_window_seconds)
     if exif_derived_events or mtime_derived_events:
         log.info(
             "Event key sources: filename=%d, exif-derived=%d, mtime-derived=%d",
@@ -748,14 +843,21 @@ def run_sort(
     # 3. Load model & run inference (cannot be interrupted mid-inference)
     status("Loading model…")
     load_start = time.perf_counter()
-    model = load_model(log)
+    model = load_classifier_backend(classifier_backend, log)
     phase_timings["load_model"] = time.perf_counter() - load_start
     if progress_callback:
         progress_callback(0.20)
 
     status(f"Running inference on {len(images_to_classify)} images…")
     inference_start = time.perf_counter()
-    predictions = classify_images(model, images_to_classify, country, region, log)
+    predictions = classify_with_backend(
+        classifier_backend,
+        model,
+        images_to_classify,
+        country,
+        region,
+        log,
+    )
     phase_timings["inference"] = time.perf_counter() - inference_start
     if progress_callback:
         progress_callback(0.85)
@@ -1272,8 +1374,10 @@ class TrailCamGUI:
                     log=log,
                     subfolders=self.subfolders_var.get(),
                     sharpness=self.sharpness_var.get(),
+                    classifier_backend="speciesnet",
                     recursive=self.recursive_var.get(),
                     use_exif_timestamps=self.exif_var.get(),
+                    event_window_seconds=0,
                     report_csv=None,
                     progress_callback=lambda v: self._q.put(("progress", v)),
                     status_callback=lambda s: self._q.put(("status", s)),
@@ -1337,12 +1441,16 @@ def main():
                         help="Preview without touching files.")
     parser.add_argument("--video-match-mode", choices=VIDEO_MATCH_MODES, default="nearest",
                         help="Video-only matching strategy: nearest (default) or minute (legacy behavior).")
+    parser.add_argument("--classifier-backend", choices=CLASSIFIER_BACKENDS, default="speciesnet",
+                        help="Classifier backend implementation (default: speciesnet).")
     parser.add_argument("--use-exif-timestamps", action="store_true", dest="use_exif_timestamps",
                         help="Use EXIF/modified-time fallback for non-standard filenames (recommended, default: on).")
     parser.add_argument("--no-exif-timestamps", action="store_false", dest="use_exif_timestamps",
                         help="Advanced: disable fallback and require strict timestamp-style filenames only.")
     parser.add_argument("--report-csv", default=None,
                         help="Optional path to write species/category counts CSV.")
+    parser.add_argument("--event-window-seconds", type=int, default=0,
+                        help="Merge adjacent timestamp events within this gap in seconds (default: 0, disabled).")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.set_defaults(use_exif_timestamps=True)
     args = parser.parse_args()
@@ -1352,6 +1460,8 @@ def main():
 
     if args.confidence is not None and not (0.0 <= args.confidence <= 1.0):
         parser.error("--confidence must be between 0 and 1")
+    if args.event_window_seconds < 0:
+        parser.error("--event-window-seconds must be >= 0")
 
     confidence_threshold = resolve_confidence_threshold(
         confidence=args.confidence,
@@ -1387,9 +1497,11 @@ def main():
         log=log,
         subfolders=not args.no_subfolders,
         sharpness=args.sharpest,
+        classifier_backend=args.classifier_backend,
         video_match_mode=args.video_match_mode,
         use_exif_timestamps=args.use_exif_timestamps,
         recursive=not args.no_recursive,
+        event_window_seconds=args.event_window_seconds,
         report_csv=Path(args.report_csv).resolve() if args.report_csv else None,
     )
 

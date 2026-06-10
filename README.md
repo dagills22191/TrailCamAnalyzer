@@ -116,6 +116,9 @@ python trailcam_sorter.py "D:/TrailCam/June2024" --move -o "E:/Sorted" --confide
 # Use a confidence preset profile (conservative|balanced|recall)
 python trailcam_sorter.py "D:/TrailCam/June2024" --confidence-profile conservative
 
+# Select classifier backend (currently speciesnet)
+python trailcam_sorter.py "D:/TrailCam/June2024" --classifier-backend speciesnet
+
 # Copy only the sharpest frame from each burst (reduces output volume)
 python trailcam_sorter.py "D:/TrailCam/June2024" --sharpest
 
@@ -127,6 +130,9 @@ python trailcam_sorter.py "D:/TrailCam/June2024" --no-exif-timestamps
 
 # Also write a species/category CSV summary for spreadsheets
 python trailcam_sorter.py "D:/TrailCam/June2024" --report-csv "D:/TrailCam/sort-summary.csv"
+
+# Merge adjacent timestamp events that are within 30 seconds
+python trailcam_sorter.py "D:/TrailCam/June2024" --event-window-seconds 30
 
 # Flat output — all files in one folder, no species subfolders
 python trailcam_sorter.py "D:/TrailCam/June2024" --no-subfolders
@@ -148,6 +154,8 @@ optional:
   -c, --confidence    Minimum confidence 0–1 (default: 0.4). Below this goes to Review/
   --confidence-profile
                       Confidence preset: conservative (0.60), balanced (0.40 default), recall (0.25)
+  --classifier-backend
+                      Classifier backend implementation (default: speciesnet)
   --country           ISO 3166-1 alpha-3 code (e.g. USA) — optional geofencing (see Notes)
   --region            US state abbreviation (e.g. VA) — only applies when country=USA
   --move              Move files instead of copying
@@ -160,6 +168,8 @@ optional:
   --no-exif-timestamps
                       Advanced: disable fallback and require strict timestamp-style filenames only
   --report-csv        Optional path to write species/category counts CSV
+  --event-window-seconds
+                      Merge adjacent timestamp events within this many seconds (default: 0, disabled)
   --dry-run           Preview without touching any files
   -v, --verbose       Debug output
 ```
@@ -192,6 +202,17 @@ The benchmark report includes:
 - total files/events/representative images
 - per-phase timing (`group_events`, `load_model`, `inference`, `sort_files`)
 - total elapsed time and inference throughput
+
+## Local dashboard script
+
+Generate a simple local HTML dashboard from `_sort_report.json` for quick visual review.
+
+```bash
+python scripts/render_sort_dashboard.py "D:/TrailCam/June2024/_sort_report.json"
+
+# custom output path + page title
+python scripts/render_sort_dashboard.py "D:/TrailCam/June2024/_sort_report.json" --output-html "D:/TrailCam/dashboard.html" --title "June 2024 TrailCam Run"
+```
 
 ## File naming convention
 
