@@ -1199,8 +1199,55 @@ class TrailCamGUI:
         opts = ctk.CTkFrame(self.root, fg_color=CARD, corner_radius=8)
         opts.pack(fill="x", padx=16, pady=(6, 0))
 
-        geo_row = ctk.CTkFrame(opts, fg_color="transparent")
-        geo_row.pack(fill="x", padx=16, pady=(14, 4))
+        mode_row = ctk.CTkFrame(opts, fg_color="transparent")
+        mode_row.pack(fill="x", padx=16, pady=(12, 4))
+
+        self.advanced_mode_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            mode_row,
+            text="Advanced mode",
+            variable=self.advanced_mode_var,
+            fg_color=GREEN,
+            hover_color=GREEN_H,
+            checkmark_color="white",
+            command=self._on_advanced_mode_toggle,
+        ).pack(side="left")
+
+        self.mode_hint_label = ctk.CTkLabel(
+            mode_row,
+            text="Basic mode shows common options. Enable advanced mode for expert controls.",
+            font=ctk.CTkFont(size=10),
+            text_color=MUTED,
+            anchor="w",
+        )
+        self.mode_hint_label.pack(side="left", padx=(12, 0))
+
+        basic_row = ctk.CTkFrame(opts, fg_color="transparent")
+        basic_row.pack(fill="x", padx=16, pady=(6, 8))
+
+        self.recursive_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            basic_row, text="Scan subfolders", variable=self.recursive_var,
+            fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
+        ).pack(side="left", padx=(0, 22))
+
+        self.move_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            basic_row, text="Move files", variable=self.move_var,
+            fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
+        ).pack(side="left", padx=(0, 22))
+
+        self.dry_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            basic_row, text="Dry run", variable=self.dry_var,
+            fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
+        ).pack(side="left", padx=(0, 22))
+
+        self.advanced_frame = ctk.CTkFrame(opts, fg_color="transparent")
+        self.advanced_frame.pack(fill="x", padx=0, pady=(0, 10))
+
+        geo_row = ctk.CTkFrame(self.advanced_frame, fg_color="transparent")
+        geo_row.pack(fill="x", padx=16, pady=(4, 4))
 
         ctk.CTkLabel(geo_row, text="Country",
                      font=ctk.CTkFont(size=11), text_color=DIM).pack(side="left", padx=(0, 6))
@@ -1240,38 +1287,20 @@ class TrailCamGUI:
         self.conf_label.pack(side="left", padx=(6, 0))
 
         ctk.CTkLabel(
-            opts,
+            self.advanced_frame,
             text="Geofencing optional · Region for USA only  ·  "
                  "Confidence: 0.4 default, lower = more results, higher = more certain",
             font=ctk.CTkFont(size=10), text_color=MUTED, anchor="w",
         ).pack(fill="x", padx=16, pady=(0, 8))
 
-        ctk.CTkFrame(opts, height=1, fg_color=SEP).pack(fill="x", padx=12, pady=(0, 10))
+        ctk.CTkFrame(self.advanced_frame, height=1, fg_color=SEP).pack(fill="x", padx=12, pady=(0, 10))
 
-        chk_row = ctk.CTkFrame(opts, fg_color="transparent")
+        chk_row = ctk.CTkFrame(self.advanced_frame, fg_color="transparent")
         chk_row.pack(fill="x", padx=16, pady=(0, 14))
-
-        self.recursive_var = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(
-            chk_row, text="Scan subfolders", variable=self.recursive_var,
-            fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
-        ).pack(side="left", padx=(0, 22))
-
-        self.move_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(
-            chk_row, text="Move files", variable=self.move_var,
-            fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
-        ).pack(side="left", padx=(0, 22))
 
         self.subfolders_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(
             chk_row, text="Species subfolders", variable=self.subfolders_var,
-            fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
-        ).pack(side="left", padx=(0, 22))
-
-        self.dry_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(
-            chk_row, text="Dry run", variable=self.dry_var,
             fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
         ).pack(side="left", padx=(0, 22))
 
@@ -1286,6 +1315,8 @@ class TrailCamGUI:
             chk_row, text="Use EXIF/modified-time fallback (recommended)", variable=self.exif_var,
             fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
         ).pack(side="left", padx=(22, 0))
+
+        self._set_advanced_mode(False)
 
         # ── Run controls ─────────────────────────────────────────────────
         section_header("RUN")
@@ -1363,6 +1394,21 @@ class TrailCamGUI:
         else:
             self.region_var.set("")
             self.region_combo.configure(state="disabled")
+
+    def _set_advanced_mode(self, enabled: bool):
+        if enabled:
+            self.advanced_frame.pack(fill="x", padx=0, pady=(0, 10))
+            self.mode_hint_label.configure(
+                text="Advanced mode enabled: geofencing and expert controls are visible."
+            )
+        else:
+            self.advanced_frame.pack_forget()
+            self.mode_hint_label.configure(
+                text="Basic mode shows common options. Enable advanced mode for expert controls."
+            )
+
+    def _on_advanced_mode_toggle(self):
+        self._set_advanced_mode(self.advanced_mode_var.get())
 
     def _browse(self, var, title: str):
         from tkinter import filedialog
