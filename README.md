@@ -84,6 +84,12 @@ python -m pytest -q
 ```powershell
 # from repo root
 .\installer\build.ps1
+
+# also build portable single-file executable
+.\installer\build.ps1 -OneFile
+
+# build only portable single-file executable (skip installer)
+.\installer\build.ps1 -OneFileOnly
 ```
 
 Notes:
@@ -91,6 +97,8 @@ Notes:
 - You can override tool paths:
   - `./installer/build.ps1 -PyInstallerExe "C:/path/to/pyinstaller.exe" -InnoExe "C:/path/to/ISCC.exe"`
 - Use `-SkipInstaller` to build only `dist/TrailCamSorter/`.
+- Portable onefile output path: `dist/TrailCamSorter-Portable.exe`.
+- Onefile startup can be slower than onedir builds because dependencies are unpacked at launch.
 
 ## Usage
 

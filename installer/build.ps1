@@ -9,13 +9,22 @@ param(
     [string]$PyInstallerExe,
     [string]$PythonExe,
     [string]$InnoExe,
-    [switch]$SkipInstaller
+    [switch]$SkipInstaller,
+    [switch]$OneFile,
+    [switch]$OneFileOnly
 )
 
 $ErrorActionPreference = "Stop"
 
-$SpecFile = "$PSScriptRoot\TrailCamSorter.spec"
-$IssFile  = "$PSScriptRoot\setup.iss"
+$OneDirSpecFile  = "$PSScriptRoot\TrailCamSorter.spec"
+$OneFileSpecFile = "$PSScriptRoot\TrailCamSorter.onefile.spec"
+$IssFile         = "$PSScriptRoot\setup.iss"
+
+$BuildOneDir = -not $OneFileOnly
+$BuildOneFile = $OneFile -or $OneFileOnly
+if ($OneFileOnly) {
+    $SkipInstaller = $true
+}
 
 function Resolve-Executable {
     param(
@@ -71,21 +80,29 @@ if ($InnoPath) {
 }
 
 # -- Step 1: PyInstaller -------------------------------------------------------
-Write-Host "`n=== Step 1: Building with PyInstaller ===" -ForegroundColor Cyan
-Write-Host "This will take several minutes and produce a ~2-3 GB dist folder.`n"
-
 Push-Location "$PSScriptRoot\.."
 try {
-    & $PyInstallerPath $SpecFile --clean -y
-    if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed (exit $LASTEXITCODE)" }
+    if ($BuildOneDir) {
+        Write-Host "`n=== Step 1A: Building folder distribution (onedir) ===" -ForegroundColor Cyan
+        Write-Host "This will take several minutes and produce dist\TrailCamSorter\." 
+        & $PyInstallerPath $OneDirSpecFile --clean -y
+        if ($LASTEXITCODE -ne 0) { throw "PyInstaller onedir build failed (exit $LASTEXITCODE)" }
+        Write-Host "Onedir build complete: dist\TrailCamSorter\" -ForegroundColor Green
+    }
+
+    if ($BuildOneFile) {
+        Write-Host "`n=== Step 1B: Building portable single-file executable (onefile) ===" -ForegroundColor Cyan
+        Write-Host "This can take longer and the executable may be large due to PyTorch dependencies." 
+        & $PyInstallerPath $OneFileSpecFile --clean -y
+        if ($LASTEXITCODE -ne 0) { throw "PyInstaller onefile build failed (exit $LASTEXITCODE)" }
+        Write-Host "Onefile build complete: dist\TrailCamSorter-Portable.exe" -ForegroundColor Green
+    }
 } finally {
     Pop-Location
 }
 
-Write-Host "`nPyInstaller build complete: dist\TrailCamSorter\" -ForegroundColor Green
-
 # -- Step 2: Inno Setup (optional) --------------------------------------------
-if (-not $SkipInstaller -and $InnoPath) {
+if ($BuildOneDir -and -not $SkipInstaller -and $InnoPath) {
     Write-Host "`n=== Step 2: Building installer with Inno Setup ===" -ForegroundColor Cyan
     Push-Location "$PSScriptRoot\.."
     try {
@@ -96,11 +113,16 @@ if (-not $SkipInstaller -and $InnoPath) {
     }
     Write-Host "`nInstaller ready: installer\output\TrailCamSorter-Setup.exe" -ForegroundColor Green
 } else {
-    Write-Host "`n=== Step 2 skipped: Inno Setup not found or -SkipInstaller passed ===" -ForegroundColor Yellow
-    Write-Host "To build the .exe installer:"
-    Write-Host "  1. Install Inno Setup 6 from https://jrsoftware.org/isinfo.php"
-    Write-Host "  2. Re-run this script (PyInstaller output will be reused)"
-    Write-Host "  Or manually: `"<path-to-ISCC.exe>`" $IssFile"
+    Write-Host "`n=== Step 2 skipped ===" -ForegroundColor Yellow
+    if (-not $BuildOneDir) {
+        Write-Host "Installer build skipped because -OneFileOnly was used."
+    } else {
+        Write-Host "Inno Setup not found or -SkipInstaller passed."
+        Write-Host "To build the .exe installer:"
+        Write-Host "  1. Install Inno Setup 6 from https://jrsoftware.org/isinfo.php"
+        Write-Host "  2. Re-run this script (PyInstaller output will be reused)"
+        Write-Host "  Or manually: `"<path-to-ISCC.exe>`" $IssFile"
+    }
 }
 
 Write-Host "`nDone." -ForegroundColor Green
