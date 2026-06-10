@@ -21,8 +21,9 @@ _sort_report.json
 installer/output/
 installer/__pycache__/
 
-# Claude Code project instructions (local only)
+# Claude Code project instructions and planning docs (local only)
 CLAUDE.md
+docs/superpowers/
 
 # OS
 .DS_Store
