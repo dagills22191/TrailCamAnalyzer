@@ -224,6 +224,27 @@ python scripts/render_sort_dashboard.py "D:/TrailCam/June2024/_sort_report.json"
 python scripts/render_sort_dashboard.py "D:/TrailCam/June2024/_sort_report.json" --output-html "D:/TrailCam/dashboard.html" --title "June 2024 TrailCam Run"
 ```
 
+## Review remediation script
+
+If you manually audit files in `Review/`, you can bulk reclassify them with a CSV mapping.
+
+CSV format:
+
+```csv
+filename,new_species
+2024-06-15_08-30-12_Review.jpg,Odocoileus Virginianus
+2024-06-15_08-30-20_Review.mp4,Ursus Americanus
+```
+
+Usage:
+
+```bash
+python scripts/apply_review_reclassifications.py "D:/TrailCam/June2024/Review" "D:/TrailCam/June2024" "D:/TrailCam/reclassify.csv"
+
+# copy instead of move
+python scripts/apply_review_reclassifications.py "D:/TrailCam/June2024/Review" "D:/TrailCam/June2024" "D:/TrailCam/reclassify.csv" --copy
+```
+
 ## File naming convention
 
 The sorter expects standard trail cam filenames:
