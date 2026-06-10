@@ -1,2 +1,3 @@
 speciesnet
 customtkinter
+opencv-python

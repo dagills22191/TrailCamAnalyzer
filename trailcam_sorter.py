@@ -11,7 +11,7 @@ Usage
 -----
     python trailcam_sorter.py                        # GUI
     python trailcam_sorter.py "D:\\TrailCam\\June2026"
-    python trailcam_sorter.py "D:\\TrailCam\\June2026" --country US --dry-run
+    python trailcam_sorter.py "D:\\TrailCam\\June2026" --country USA --dry-run
     python trailcam_sorter.py "D:\\TrailCam\\June2026" --confidence 0.5 --move
 """
 
@@ -834,6 +834,10 @@ class TrailCamGUI:
         self._cancel_event.set()
         self.cancel_btn.configure(state="disabled", text="Cancelling…")
         self._append_log("Cancelling — will stop after current operation...")
+        if self._busy:
+            self.status_label.configure(
+                text="Waiting for inference to finish before cancelling…"
+            )
 
     def _on_run(self):
         if self._running:

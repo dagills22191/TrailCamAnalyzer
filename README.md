@@ -141,3 +141,25 @@ Output files are always renamed to `yyyy-mm-dd_HH-MM-SS_Species Name.ext` regard
 - On Windows, run inside a `conda activate trailcam` session or use the full Python path
 - **Geofencing** (`--country`/`--region`) applies a geographic range prior from wildlife databases. Use ISO 3166-1 alpha-3 codes for country (e.g. `USA`, not `US`) and 2-letter state abbreviations for region (e.g. `VA`, not `US-VA`). Region is only supported for USA. Leaving both blank is safe.
 - **Sharpness / blur detection** (`--sharpest`) scores each image in a burst using Laplacian variance and keeps only the highest-scoring frame. Useful for reducing output when your camera fires 3–5 shots per trigger. Videos are always copied regardless of this setting.
+
+## Troubleshooting
+
+**First run is slow or seems stuck**
+The model weights (~1 GB) are downloaded on first run to `%USERPROFILE%\.cache\kagglehub\` (Windows) or `~/.cache/kagglehub/` (Mac/Linux). This is a one-time download. Subsequent runs load from cache and are much faster. The progress bar animates during download and inference — this is normal.
+
+**"Sharpest frame" produces no improvement**
+`--sharpest` requires `opencv-python`. If it isn't installed, all sharpness scores will be 0.0 and the first image in each burst will be selected instead. Install it with:
+```bash
+pip install opencv-python
+```
+
+**Files aren't being picked up**
+- The sorter accepts `.jpg`, `.jpeg`, `.png`, `.bmp`, `.tif`, `.tiff`, `.mp4`, `.avi`, `.mov`, `.mkv`
+- Files with no EXIF and no timestamp in the filename are grouped by modification time — check that file dates weren't reset when copying from your SD card
+- Use `--verbose` to see per-file decisions in the log
+
+**Geofencing not working**
+Use ISO 3166-1 alpha-3 codes for country (`USA`, not `US`) and 2-letter state abbreviations for region (`VA`, not `Virginia` or `US-VA`). Region only applies when country is `USA`.
+
+**Output goes entirely to `Review/`**
+Lower the confidence threshold with `-c 0.2` or `--confidence 0.2`. The default of 0.4 is conservative — results below this threshold are routed to `Review/` for manual inspection.

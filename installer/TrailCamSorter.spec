@@ -7,7 +7,7 @@
 # Output: dist\TrailCamSorter\  (~2-3 GB due to PyTorch)
 # Model weights are NOT bundled — downloaded at first run to %USERPROFILE%\.cache\kagglehub\
 
-from PyInstaller.utils.hooks import collect_all, collect_data_files
+from PyInstaller.utils.hooks import collect_all, collect_data_files, copy_metadata
 
 datas = []
 binaries = []
@@ -18,6 +18,13 @@ for pkg in ['customtkinter', 'speciesnet', 'yolov5']:
     datas += d
     binaries += b
     hiddenimports += h
+
+# Copy package metadata for packages that read it at runtime via importlib.metadata
+for pkg in ['cloudpathlib', 'kagglehub', 'speciesnet', 'torch', 'torchvision']:
+    try:
+        datas += copy_metadata(pkg)
+    except Exception:
+        pass
 
 a = Analysis(
     ['..\\trailcam_sorter.py'],
@@ -30,6 +37,7 @@ a = Analysis(
         'tkinter.filedialog',
         'PIL._tkinter_finder',
         'pkg_resources.py2_warn',
+        'onnx2torch',
     ],
     hookspath=[],
     hooksconfig={},
