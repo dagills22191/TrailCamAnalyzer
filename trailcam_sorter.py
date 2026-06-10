@@ -598,6 +598,9 @@ class TrailCamGUI:
         self.dry_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(opts, text="Dry run (preview only)", variable=self.dry_var
                         ).grid(row=2, column=4, columnspan=3, padx=12, pady=(4, 10), sticky="w")
+        self.sharpness_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(opts, text="Pick sharpest frame (blur detection)", variable=self.sharpness_var
+                        ).grid(row=3, column=0, columnspan=4, padx=12, pady=(0, 10), sticky="w")
 
         # ── Run / Cancel ──────────────────────────────────────────────────
         btn_row = ctk.CTkFrame(self.root, fg_color="transparent")
@@ -760,6 +763,7 @@ class TrailCamGUI:
                     verbose=False,
                     log=log,
                     subfolders=self.subfolders_var.get(),
+                    sharpness=self.sharpness_var.get(),
                     progress_callback=lambda v: self._q.put(("progress", v)),
                     status_callback=lambda s: self._q.put(("status", s)),
                     cancel_event=self._cancel_event,
