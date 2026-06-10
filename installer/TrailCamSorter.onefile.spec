@@ -29,7 +29,6 @@ a = Analysis(
         'tkinter',
         'tkinter.filedialog',
         'PIL._tkinter_finder',
-        'pkg_resources.py2_warn',
     ],
     hookspath=[],
     hooksconfig={},

@@ -107,6 +107,8 @@ Notes:
 python trailcam_sorter.py
 ```
 
+Basic mode includes core controls (scan subfolders, move/copy, dry run), plus geofencing (country/US region) and confidence threshold. Advanced mode exposes expert options like species subfolders, sharpest-frame selection, and EXIF fallback.
+
 **Command line:**
 ```bash
 # Dry run — shows what would happen, copies nothing

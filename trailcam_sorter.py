@@ -1243,55 +1243,99 @@ class TrailCamGUI:
             fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
         ).pack(side="left", padx=(0, 22))
 
-        self.advanced_frame = ctk.CTkFrame(opts, fg_color="transparent")
-        self.advanced_frame.pack(fill="x", padx=0, pady=(0, 10))
+        basic_geo_row = ctk.CTkFrame(opts, fg_color="transparent")
+        basic_geo_row.pack(fill="x", padx=16, pady=(0, 6))
 
-        geo_row = ctk.CTkFrame(self.advanced_frame, fg_color="transparent")
-        geo_row.pack(fill="x", padx=16, pady=(4, 4))
-
-        ctk.CTkLabel(geo_row, text="Country",
-                     font=ctk.CTkFont(size=11), text_color=DIM).pack(side="left", padx=(0, 6))
+        ctk.CTkLabel(
+            basic_geo_row,
+            text="Country",
+            font=ctk.CTkFont(size=11),
+            text_color=DIM,
+        ).pack(side="left", padx=(0, 6))
         self.country_var = ctk.StringVar(value="")
         self.country_combo = ctk.CTkComboBox(
-            geo_row, variable=self.country_var, width=96, values=COUNTRY_CODES,
-            fg_color=INNER, border_color=SEP, button_color=SEP, button_hover_color=CLOSE_H,
-            dropdown_fg_color=INNER, dropdown_hover_color=CLOSE_H, dropdown_text_color=TEXT,
+            basic_geo_row,
+            variable=self.country_var,
+            width=96,
+            values=COUNTRY_CODES,
+            fg_color=INNER,
+            border_color=SEP,
+            button_color=SEP,
+            button_hover_color=CLOSE_H,
+            dropdown_fg_color=INNER,
+            dropdown_hover_color=CLOSE_H,
+            dropdown_text_color=TEXT,
             command=self._on_country_change,
         )
         self.country_combo.pack(side="left", padx=(0, 20))
 
-        ctk.CTkLabel(geo_row, text="Region (US)",
-                     font=ctk.CTkFont(size=11), text_color=DIM).pack(side="left", padx=(0, 6))
+        ctk.CTkLabel(
+            basic_geo_row,
+            text="Region (US)",
+            font=ctk.CTkFont(size=11),
+            text_color=DIM,
+        ).pack(side="left", padx=(0, 6))
         self.region_var = ctk.StringVar(value="")
         self.region_combo = ctk.CTkComboBox(
-            geo_row, variable=self.region_var, width=86, values=US_STATES, state="disabled",
-            fg_color=INNER, border_color=SEP, button_color=SEP, button_hover_color=CLOSE_H,
-            dropdown_fg_color=INNER, dropdown_hover_color=CLOSE_H, dropdown_text_color=TEXT,
+            basic_geo_row,
+            variable=self.region_var,
+            width=86,
+            values=US_STATES,
+            state="disabled",
+            fg_color=INNER,
+            border_color=SEP,
+            button_color=SEP,
+            button_hover_color=CLOSE_H,
+            dropdown_fg_color=INNER,
+            dropdown_hover_color=CLOSE_H,
+            dropdown_text_color=TEXT,
         )
         self.region_combo.pack(side="left", padx=(0, 28))
 
-        ctk.CTkLabel(geo_row, text="Confidence",
-                     font=ctk.CTkFont(size=11), text_color=DIM).pack(side="left", padx=(0, 8))
+        ctk.CTkLabel(
+            basic_geo_row,
+            text="Confidence",
+            font=ctk.CTkFont(size=11),
+            text_color=DIM,
+        ).pack(side="left", padx=(0, 8))
         self.conf_var = ctk.DoubleVar(value=0.4)
         ctk.CTkSlider(
-            geo_row, from_=0.1, to=0.9, number_of_steps=16,
-            variable=self.conf_var, width=140,
-            button_color=GREEN, button_hover_color=GREEN_H, progress_color=GREEN,
+            basic_geo_row,
+            from_=0.1,
+            to=0.9,
+            number_of_steps=16,
+            variable=self.conf_var,
+            width=140,
+            button_color=GREEN,
+            button_hover_color=GREEN_H,
+            progress_color=GREEN,
             fg_color=INNER,
             command=lambda v: self.conf_label.configure(text=f"{float(v):.2f}"),
         ).pack(side="left")
         self.conf_label = ctk.CTkLabel(
-            geo_row, text="0.40", width=40,
-            font=ctk.CTkFont(size=12, weight="bold"), text_color=TEXT,
+            basic_geo_row,
+            text="0.40",
+            width=40,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=TEXT,
         )
-        self.conf_label.pack(side="left", padx=(6, 0))
+        self.conf_label.pack(side="left", padx=(6, 18))
+
+        ctk.CTkLabel(
+            basic_geo_row,
+            text="Geofencing optional · Region applies to USA only · lower confidence = more results",
+            font=ctk.CTkFont(size=10),
+            text_color=MUTED,
+        ).pack(side="left")
+
+        self.advanced_frame = ctk.CTkFrame(opts, fg_color="transparent")
+        self.advanced_frame.pack(fill="x", padx=0, pady=(0, 10))
 
         ctk.CTkLabel(
             self.advanced_frame,
-            text="Geofencing optional · Region for USA only  ·  "
-                 "Confidence: 0.4 default, lower = more results, higher = more certain",
+            text="Advanced options for output layout and event handling.",
             font=ctk.CTkFont(size=10), text_color=MUTED, anchor="w",
-        ).pack(fill="x", padx=16, pady=(0, 8))
+        ).pack(fill="x", padx=16, pady=(2, 8))
 
         ctk.CTkFrame(self.advanced_frame, height=1, fg_color=SEP).pack(fill="x", padx=12, pady=(0, 10))
 
@@ -1399,12 +1443,12 @@ class TrailCamGUI:
         if enabled:
             self.advanced_frame.pack(fill="x", padx=0, pady=(0, 10))
             self.mode_hint_label.configure(
-                text="Advanced mode enabled: geofencing and expert controls are visible."
+                text="Advanced mode enabled: expert controls are visible."
             )
         else:
             self.advanced_frame.pack_forget()
             self.mode_hint_label.configure(
-                text="Basic mode shows common options. Enable advanced mode for expert controls."
+                text="Basic mode shows common options, including geofencing and confidence. Enable advanced mode for expert controls."
             )
 
     def _on_advanced_mode_toggle(self):
