@@ -787,7 +787,7 @@ class TrailCamGUI:
         from tkinter import filedialog
         folder = filedialog.askdirectory(title=title, parent=self.root)
         if folder:
-            var.set(folder)
+            var.set(str(Path(folder)))
 
     def _set_progress(self, value: float):
         self._busy = False
