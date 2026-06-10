@@ -101,19 +101,46 @@ def sanitize_label(label: str) -> str:
     return name.strip().title() if name else "Unknown"
 
 
+def _event_key_from_exif(path: Path) -> Optional[str]:
+    """Read DateTimeOriginal (or DateTime) from EXIF and return as YYYYMMDD_HHMMSS."""
+    try:
+        from PIL import Image
+        img = Image.open(path)
+        exif = img.getexif()
+        dt_str = exif.get(36867) or exif.get(306)   # DateTimeOriginal, then DateTime
+        if dt_str:
+            dt = datetime.strptime(dt_str.strip(), "%Y:%m:%d %H:%M:%S")
+            return dt.strftime("%Y%m%d_%H%M%S")
+    except Exception:
+        pass
+    return None
+
+
+def _event_key_from_mtime(path: Path) -> str:
+    """Fall back to file modification time as YYYYMMDD_HHMMSS."""
+    dt = datetime.fromtimestamp(path.stat().st_mtime)
+    return dt.strftime("%Y%m%d_%H%M%S")
+
+
 def group_events(folder: Path, recursive: bool = True) -> dict[str, list[Path]]:
     """Group files by their base timestamp (the 'event key').
 
+    Priority: (1) filename pattern match, (2) EXIF DateTimeOriginal, (3) file mtime.
     Returns {event_key: [file1, file2, ...]} where event_key = "20240615_083012".
     """
     events: dict[str, list[Path]] = defaultdict(list)
     scan = folder.rglob("*") if recursive else folder.glob("*")
     for f in sorted(scan):
-        if not f.is_file():
+        if not f.is_file() or f.suffix.lower() not in ALL_EXTS:
             continue
         m = EVENT_PATTERN.match(f.name)
-        if m and f.suffix.lower() in ALL_EXTS:
-            events[m.group(1)].append(f)
+        if m:
+            event_key = m.group(1)
+        elif f.suffix.lower() in IMAGE_EXTS:
+            event_key = _event_key_from_exif(f) or _event_key_from_mtime(f)
+        else:
+            event_key = _event_key_from_mtime(f)
+        events[event_key].append(f)
     return dict(events)
 
 

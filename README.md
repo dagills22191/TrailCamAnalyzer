@@ -5,6 +5,7 @@ Automatically identifies animals in trail camera photos and videos using Google 
 ## What it does
 
 - Identifies 2000+ species (plus vehicles, birds, etc.) using Google SpeciesNet — runs on CPU, no GPU required
+- Works with files straight off an SD card — reads timestamps from EXIF data when filenames don't follow a trail-cam pattern
 - Classifies one representative image per trigger event, then applies the same label to every file in that burst (variants `_1`, `_2`, associated `.mp4`)
 - Matches video-only events to classified image events fired within the same minute
 - Renames all output files to `yyyy-mm-dd_HH-MM-SS_Species Name.ext` for easy browsing and sorting
@@ -117,15 +118,21 @@ optional:
 
 ## File naming convention
 
-The sorter expects standard trail cam filenames:
-```
-20240615_083012.jpg      base image (classified)
-20240615_083012_1.jpg    variant
-20240615_083012_2.jpg    variant
-20240615_083012.mp4      video
-```
+Files are accepted in any of these forms — the sorter tries each in order:
 
-Files that don't match this pattern are ignored.
+1. **Standard trail cam filenames** (fastest, no file reads needed):
+   ```
+   20240615_083012.jpg      base image
+   20240615_083012_1.jpg    burst variant
+   20240615_083012_2.jpg    burst variant
+   20240615_083012.mp4      video
+   ```
+
+2. **Any image with EXIF data** — `DateTimeOriginal` is read directly from the photo metadata. This covers JPEGs straight off an SD card with generic names like `DSCF0001.JPG` or `IMG_20240615_083012.jpg`.
+
+3. **Files with no EXIF** — the file's modification timestamp is used as a fallback. Videos typically fall into this category.
+
+Output files are always renamed to `yyyy-mm-dd_HH-MM-SS_Species Name.ext` regardless of the original filename.
 
 ## Notes
 
