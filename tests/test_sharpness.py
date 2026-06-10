@@ -10,11 +10,15 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from trailcam_sorter import (
+    CONFIDENCE_PROFILES,
     group_events,
     pick_representative,
+    RunResult,
+    resolve_confidence_threshold,
     score_sharpness,
     sort_files,
     write_report,
+    write_species_csv,
 )
 
 
@@ -561,3 +565,57 @@ def test_write_report_includes_run_summary_metrics_and_timings(tmp_path):
     assert report["video_matching"]["video_matched_nearest"] == 1
     assert report["event_key_sources"]["exif_derived_events"] == 1
     assert report["timings_seconds"]["inference"] == 0.3
+
+
+def test_write_species_csv_writes_sorted_counts_with_percentages(tmp_path):
+    import logging
+
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    csv_path = dst / "summary.csv"
+    stats = {
+        "Review": 2,
+        "Odocoileus Virginianus": 6,
+        "Ursus Americanus": 2,
+    }
+
+    output = write_species_csv(dst, stats, logging.getLogger("test"), csv_path=csv_path)
+
+    lines = output.read_text(encoding="utf-8").splitlines()
+    assert output == csv_path
+    assert lines[0] == "category,count,percent_of_sorted"
+    assert lines[1].startswith("Odocoileus Virginianus,6,")
+    assert lines[2].startswith("Review,2,")
+    assert lines[3].startswith("Ursus Americanus,2,")
+    assert lines[1].endswith("60.00")
+
+
+def test_run_result_dataclass_defaults_paths_none():
+    result = RunResult(
+        source=Path("src"),
+        output=Path("out"),
+        dry_run=True,
+        total_files_scanned=0,
+        total_events=0,
+        classified_image_events=0,
+        video_only_events=0,
+        total_files_sorted=0,
+        species_counts={},
+        review_files=0,
+        phase_timings={},
+        video_matching={},
+        event_key_sources={},
+    )
+
+    assert result.report_path is None
+    assert result.csv_report_path is None
+
+
+def test_resolve_confidence_threshold_uses_profile_when_value_missing():
+    assert resolve_confidence_threshold(None, "conservative") == CONFIDENCE_PROFILES["conservative"]
+    assert resolve_confidence_threshold(None, "balanced") == CONFIDENCE_PROFILES["balanced"]
+    assert resolve_confidence_threshold(None, "recall") == CONFIDENCE_PROFILES["recall"]
+
+
+def test_resolve_confidence_threshold_explicit_value_wins():
+    assert resolve_confidence_threshold(0.33, "conservative") == 0.33

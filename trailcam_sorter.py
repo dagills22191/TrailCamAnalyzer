@@ -22,6 +22,7 @@ import warnings
 warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
 
 import argparse
+import csv
 import json
 import logging
 import queue
@@ -31,6 +32,7 @@ import sys
 import threading
 import time
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Literal, Optional
@@ -62,6 +64,11 @@ EXIF_DATETIME_TAGS = ("DateTimeOriginal", "DateTimeDigitized", "DateTime")
 EVENT_KEY_SOURCE_FILENAME = "filename"
 EVENT_KEY_SOURCE_EXIF = "exif"
 EVENT_KEY_SOURCE_MTIME = "mtime"
+CONFIDENCE_PROFILES = {
+    "conservative": 0.60,
+    "balanced": 0.40,
+    "recall": 0.25,
+}
 
 # Matches: 20240615_083012.jpg, 20240615_083012_1.jpg, 20240615_083012_2.mp4
 EVENT_PATTERN = re.compile(
@@ -252,6 +259,16 @@ def parse_event_key_timestamp(event_key: str) -> Optional[datetime]:
         return None
 
 
+def resolve_confidence_threshold(
+    confidence: Optional[float],
+    profile: str = "balanced",
+) -> float:
+    """Resolve confidence threshold from explicit value or named profile."""
+    if confidence is not None:
+        return confidence
+    return CONFIDENCE_PROFILES.get(profile, CONFIDENCE_PROFILES["balanced"])
+
+
 # ---------------------------------------------------------------------------
 # SpeciesNet wrapper
 # ---------------------------------------------------------------------------
@@ -303,6 +320,25 @@ def classify_images(
 
 class Cancelled(Exception):
     pass
+
+
+@dataclass
+class RunResult:
+    source: Path
+    output: Path
+    dry_run: bool
+    total_files_scanned: int
+    total_events: int
+    classified_image_events: int
+    video_only_events: int
+    total_files_sorted: int
+    species_counts: dict[str, int]
+    review_files: int
+    phase_timings: dict[str, float]
+    video_matching: dict[str, int]
+    event_key_sources: dict[str, int]
+    report_path: Optional[Path] = None
+    csv_report_path: Optional[Path] = None
 
 
 def sort_files(
@@ -517,6 +553,29 @@ def write_report(
     report_path = dest_root / "_sort_report.json"
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     log.info("Report saved to %s", report_path)
+    return report_path
+
+
+def write_species_csv(
+    dest_root: Path,
+    stats: dict[str, int],
+    log: logging.Logger,
+    csv_path: Optional[Path] = None,
+) -> Path:
+    """Write species/category counts to CSV for spreadsheet analysis."""
+    output_path = csv_path if csv_path is not None else (dest_root / "_sort_report.csv")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    total = sum(stats.values())
+    with output_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["category", "count", "percent_of_sorted"])
+        for category, count in sorted(stats.items(), key=lambda x: -x[1]):
+            pct = (count / total * 100.0) if total else 0.0
+            writer.writerow([category, count, f"{pct:.2f}"])
+
+    log.info("CSV report saved to %s", output_path)
+    return output_path
 
 
 # ---------------------------------------------------------------------------
@@ -538,10 +597,11 @@ def run_sort(
     video_match_mode: Literal["nearest", "minute"] = "nearest",
     use_exif_timestamps: bool = True,
     recursive: bool = True,
+    report_csv: Optional[Path] = None,
     progress_callback: Optional[Callable[[float], None]] = None,
     status_callback: Optional[Callable[[str], None]] = None,
     cancel_event: Optional[threading.Event] = None,
-):
+)-> RunResult:
     """Run the full sort pipeline. Raises Cancelled if cancel_event is set."""
     def check():
         if cancel_event and cancel_event.is_set():
@@ -583,9 +643,33 @@ def run_sort(
         event_source_map=event_source_map,
     )
     phase_timings["group_events"] = time.perf_counter() - group_start
+    total_files = sum(len(v) for v in events.values())
     if not events:
         log.warning("No matching files found in %s", source)
-        return
+        return RunResult(
+            source=source,
+            output=dest_root,
+            dry_run=dry_run,
+            total_files_scanned=0,
+            total_events=0,
+            classified_image_events=0,
+            video_only_events=0,
+            total_files_sorted=0,
+            species_counts={},
+            review_files=0,
+            phase_timings=phase_timings,
+            video_matching={
+                "video_only_events": 0,
+                "video_matched_nearest": 0,
+                "video_matched_minute": 0,
+                "video_unmatched": 0,
+            },
+            event_key_sources={
+                "filename_events": 0,
+                "exif_derived_events": 0,
+                "mtime_derived_events": 0,
+            },
+        )
 
     filename_events = sum(
         1 for srcs in event_source_map.values() if EVENT_KEY_SOURCE_FILENAME in srcs
@@ -606,7 +690,6 @@ def run_sort(
         "mtime_derived_events": mtime_derived_events,
     }
 
-    total_files = sum(len(v) for v in events.values())
     log.info("Found %d events encompassing %d files", len(events), total_files)
     if exif_derived_events or mtime_derived_events:
         log.info(
@@ -634,7 +717,26 @@ def run_sort(
 
     if not images_to_classify:
         log.warning("No images to classify -- nothing to do.")
-        return
+        return RunResult(
+            source=source,
+            output=dest_root,
+            dry_run=dry_run,
+            total_files_scanned=total_files,
+            total_events=len(events),
+            classified_image_events=0,
+            video_only_events=len(events),
+            total_files_sorted=0,
+            species_counts={},
+            review_files=0,
+            phase_timings=phase_timings,
+            video_matching={
+                "video_only_events": len(events),
+                "video_matched_nearest": 0,
+                "video_matched_minute": 0,
+                "video_unmatched": len(events),
+            },
+            event_key_sources=grouping_source_stats,
+        )
 
     if sharpness and not is_cv2_available():
         log.warning("--sharpest enabled but OpenCV (cv2) is not available; "
@@ -692,9 +794,12 @@ def run_sort(
         video_match_stats.get("video_unmatched", 0),
     )
 
+    report_path: Optional[Path] = None
+    csv_report_path: Optional[Path] = None
+
     # 5. Write report
     if not dry_run:
-        write_report(
+        report_path = write_report(
             dest_root,
             events,
             predictions,
@@ -705,6 +810,13 @@ def run_sort(
             video_match_stats=video_match_stats,
             grouping_source_stats=grouping_source_stats,
         )
+        if report_csv is not None:
+            csv_report_path = write_species_csv(
+                dest_root=dest_root,
+                stats=stats,
+                log=log,
+                csv_path=report_csv,
+            )
 
     # Summary
     total_sorted = sum(stats.values())
@@ -741,6 +853,24 @@ def run_sort(
     status(f"Complete — {total_sorted} file{'s' if total_sorted != 1 else ''} sorted")
     if progress_callback:
         progress_callback(1.0)
+
+    return RunResult(
+        source=source,
+        output=dest_root,
+        dry_run=dry_run,
+        total_files_scanned=total_files,
+        total_events=len(events),
+        classified_image_events=len(rep_map),
+        video_only_events=max(len(events) - len(rep_map), 0),
+        total_files_sorted=total_sorted,
+        species_counts=dict(sorted(stats.items(), key=lambda x: -x[1])),
+        review_files=stats.get("Review", 0),
+        phase_timings=phase_timings,
+        video_matching=video_match_stats,
+        event_key_sources=grouping_source_stats,
+        report_path=report_path,
+        csv_report_path=csv_report_path,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1144,6 +1274,7 @@ class TrailCamGUI:
                     sharpness=self.sharpness_var.get(),
                     recursive=self.recursive_var.get(),
                     use_exif_timestamps=self.exif_var.get(),
+                    report_csv=None,
                     progress_callback=lambda v: self._q.put(("progress", v)),
                     status_callback=lambda s: self._q.put(("status", s)),
                     cancel_event=self._cancel_event,
@@ -1181,8 +1312,14 @@ def main():
     parser.add_argument("source", help="Folder containing trail-cam images/videos.")
     parser.add_argument("-o", "--output", default=str(Path.home() / "TrailCamAnimals"),
                         help="Destination root.  Default: ~/TrailCamAnimals")
-    parser.add_argument("-c", "--confidence", type=float, default=0.4,
-                        help="Minimum confidence threshold (0-1).  Default: 0.4")
+    parser.add_argument("-c", "--confidence", type=float, default=None,
+                        help="Minimum confidence threshold (0-1). Overrides --confidence-profile.")
+    parser.add_argument(
+        "--confidence-profile",
+        choices=tuple(CONFIDENCE_PROFILES.keys()),
+        default="balanced",
+        help="Confidence preset: conservative=0.60, balanced=0.40 (default), recall=0.25",
+    )
     parser.add_argument("--country", default=None,
                         help="ISO 3166-1 alpha-3 country code (e.g. USA)")
     parser.add_argument("--region", default=None,
@@ -1204,6 +1341,8 @@ def main():
                         help="Use EXIF/modified-time fallback for non-standard filenames (recommended, default: on).")
     parser.add_argument("--no-exif-timestamps", action="store_false", dest="use_exif_timestamps",
                         help="Advanced: disable fallback and require strict timestamp-style filenames only.")
+    parser.add_argument("--report-csv", default=None,
+                        help="Optional path to write species/category counts CSV.")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.set_defaults(use_exif_timestamps=True)
     args = parser.parse_args()
@@ -1211,9 +1350,25 @@ def main():
     if args.region and (args.country or "").upper() != "USA":
         parser.error("--region requires --country USA")
 
+    if args.confidence is not None and not (0.0 <= args.confidence <= 1.0):
+        parser.error("--confidence must be between 0 and 1")
+
+    confidence_threshold = resolve_confidence_threshold(
+        confidence=args.confidence,
+        profile=args.confidence_profile,
+    )
+
     level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(format=LOG_FMT, level=level, stream=sys.stdout)
     log = logging.getLogger("trailcam_sorter")
+    if args.confidence is None:
+        log.info(
+            "Using confidence profile '%s' (threshold %.2f)",
+            args.confidence_profile,
+            confidence_threshold,
+        )
+    else:
+        log.info("Using explicit confidence threshold %.2f", confidence_threshold)
 
     source = Path(args.source).resolve()
     if not source.is_dir():
@@ -1223,7 +1378,7 @@ def main():
     run_sort(
         source=source,
         dest_root=Path(args.output).resolve(),
-        confidence=args.confidence,
+        confidence=confidence_threshold,
         country=args.country,
         region=args.region,
         move=args.move,
@@ -1235,6 +1390,7 @@ def main():
         video_match_mode=args.video_match_mode,
         use_exif_timestamps=args.use_exif_timestamps,
         recursive=not args.no_recursive,
+        report_csv=Path(args.report_csv).resolve() if args.report_csv else None,
     )
 
 

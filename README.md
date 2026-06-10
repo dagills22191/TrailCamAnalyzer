@@ -113,6 +113,9 @@ python trailcam_sorter.py "D:/TrailCam/June2024" --video-match-mode minute
 # Move instead of copy, custom output folder, lower confidence threshold
 python trailcam_sorter.py "D:/TrailCam/June2024" --move -o "E:/Sorted" --confidence 0.3
 
+# Use a confidence preset profile (conservative|balanced|recall)
+python trailcam_sorter.py "D:/TrailCam/June2024" --confidence-profile conservative
+
 # Copy only the sharpest frame from each burst (reduces output volume)
 python trailcam_sorter.py "D:/TrailCam/June2024" --sharpest
 
@@ -121,6 +124,9 @@ python trailcam_sorter.py "D:/TrailCam/June2024" --use-exif-timestamps
 
 # Advanced: disable fallback only if you intentionally want strict filename-only parsing
 python trailcam_sorter.py "D:/TrailCam/June2024" --no-exif-timestamps
+
+# Also write a species/category CSV summary for spreadsheets
+python trailcam_sorter.py "D:/TrailCam/June2024" --report-csv "D:/TrailCam/sort-summary.csv"
 
 # Flat output — all files in one folder, no species subfolders
 python trailcam_sorter.py "D:/TrailCam/June2024" --no-subfolders
@@ -140,6 +146,8 @@ positional:
 optional:
   -o, --output        Destination root (default: ~/TrailCamAnimals)
   -c, --confidence    Minimum confidence 0–1 (default: 0.4). Below this goes to Review/
+  --confidence-profile
+                      Confidence preset: conservative (0.60), balanced (0.40 default), recall (0.25)
   --country           ISO 3166-1 alpha-3 code (e.g. USA) — optional geofencing (see Notes)
   --region            US state abbreviation (e.g. VA) — only applies when country=USA
   --move              Move files instead of copying
@@ -151,6 +159,7 @@ optional:
                       Use image EXIF date/time when filenames don't match expected timestamp format (default: on)
   --no-exif-timestamps
                       Advanced: disable fallback and require strict timestamp-style filenames only
+  --report-csv        Optional path to write species/category counts CSV
   --dry-run           Preview without touching any files
   -v, --verbose       Debug output
 ```
