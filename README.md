@@ -95,6 +95,7 @@ optional:
   --region            US state abbreviation (e.g. VA) — only applies when country=USA
   --move              Move files instead of copying
   --no-subfolders     Put all files flat in the output folder instead of species subfolders
+  --no-recursive      Scan only the top-level source folder; ignore subfolders
   --sharpest          Copy only the sharpest frame per burst (blur detection). Videos always included.
   --dry-run           Preview without touching any files
   -v, --verbose       Debug output
