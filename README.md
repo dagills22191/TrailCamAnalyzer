@@ -4,12 +4,20 @@ Automatically identifies animals in trail camera photos and videos using Google 
 
 ## What it does
 
-- Classifies one representative image per trigger event (burst of photos + video)
-- Applies the same species label to all files in that event (variants `_1`, `_2`, associated `.mp4`)
+- Identifies 2000+ species (plus vehicles, birds, etc.) using Google SpeciesNet — runs on CPU, no GPU required
+- Classifies one representative image per trigger event, then applies the same label to every file in that burst (variants `_1`, `_2`, associated `.mp4`)
 - Matches video-only events to classified image events fired within the same minute
-- Renames output files to `yyyy-mm-dd_HH-MM-SS_Species Name.ext`
-- Skips blank frames; routes uncertain/low-confidence images to a `Review` folder
-- Optional blur detection: scores each burst image for sharpness and copies only the sharpest frame
+- Renames all output files to `yyyy-mm-dd_HH-MM-SS_Species Name.ext` for easy browsing and sorting
+- Skips blank frames; routes uncertain or low-confidence results to a `Review/` folder for manual inspection
+- **Copy or move** — non-destructive copy by default, or move to save disk space
+- **Species subfolders** — organises output into one folder per species, or dump flat into a single folder
+- **Geofencing** — optionally filter predictions by country and US state to improve accuracy in your region
+- **Confidence threshold** — tune how certain the model needs to be before filing a result (default 0.4)
+- **Sharpest frame selection** — when your camera fires bursts, scores each frame for sharpness and keeps only the clearest one
+- **Recursive or top-level scan** — walk the full source folder tree, or scan only the top-level folder
+- **Dry run mode** — preview exactly what would be copied/moved without touching any files
+- **Verbose logging** — per-file debug output for troubleshooting
+- Saves a `_sort_report.json` summary with species counts and per-event details
 
 **Output structure:**
 ```
