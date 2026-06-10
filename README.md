@@ -207,3 +207,44 @@ Use `--no-exif-timestamps` to force strict filename-only behavior.
 - **EXIF timestamp fallback** is enabled by default and lets non-standard image filenames (for example `DSCF0001.JPG`) still be grouped and named by capture time. If EXIF is unavailable/unreadable, file modified time is used as a fallback. These derived times are also used in output filenames. Use `--no-exif-timestamps` for strict filename-only behavior.
 - `--no-exif-timestamps` is an advanced troubleshooting option. Most users should leave fallback enabled, especially when importing directly from SD cards.
 - **Dry run naming** simulates collision handling, so planned destination names include suffixes (`_2`, `_3`, etc.) just like real runs when files already exist.
+
+## Report schema (quick reference)
+
+Each non-dry run writes `_sort_report.json` to the output folder.
+
+```json
+{
+  "generated": "2026-06-10T12:34:56.789012",
+  "total_events": 1964,
+  "total_files_sorted": 1803,
+  "summary": {
+    "classified_image_events": 1357,
+    "video_only_events": 607,
+    "exif_derived_events": 112,
+    "mtime_derived_events": 24
+  },
+  "timings_seconds": {
+    "group_events": 2.43,
+    "load_model": 8.11,
+    "inference": 1282.20,
+    "sort_files": 14.88,
+    "total_pipeline": 1308.01
+  },
+  "video_matching": {
+    "video_only_events": 607,
+    "video_matched_nearest": 521,
+    "video_matched_minute": 0,
+    "video_unmatched": 86
+  },
+  "event_key_sources": {
+    "filename_events": 1828,
+    "exif_derived_events": 112,
+    "mtime_derived_events": 24
+  },
+  "species_counts": {
+    "Odocoileus Virginianus": 611,
+    "Review": 94
+  },
+  "event_details": []
+}
+```

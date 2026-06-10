@@ -59,6 +59,9 @@ ALL_EXTS = IMAGE_EXTS | VIDEO_EXTS
 VIDEO_MATCH_MAX_GAP_SECONDS = 60
 VIDEO_MATCH_MODES = ("nearest", "minute")
 EXIF_DATETIME_TAGS = ("DateTimeOriginal", "DateTimeDigitized", "DateTime")
+EVENT_KEY_SOURCE_FILENAME = "filename"
+EVENT_KEY_SOURCE_EXIF = "exif"
+EVENT_KEY_SOURCE_MTIME = "mtime"
 
 # Matches: 20240615_083012.jpg, 20240615_083012_1.jpg, 20240615_083012_2.mp4
 EVENT_PATTERN = re.compile(
@@ -129,16 +132,25 @@ def read_exif_datetime(path: Path) -> Optional[datetime]:
     return None
 
 
-def event_key_for_file(path: Path, use_exif_timestamps: bool = False) -> Optional[str]:
-    """Resolve a file to an event key (YYYYMMDD_HHMMSS)."""
+def event_key_and_source_for_file(
+    path: Path,
+    use_exif_timestamps: bool = False,
+) -> tuple[Optional[str], Optional[str]]:
+    """Resolve a file to an event key and source type.
+
+    Returns (event_key, source) where source is one of: filename, exif, mtime.
+    """
     m = EVENT_PATTERN.match(path.name)
     if m and path.suffix.lower() in ALL_EXTS:
-        return m.group(1)
+        return m.group(1), EVENT_KEY_SOURCE_FILENAME
 
     if use_exif_timestamps and path.suffix.lower() in ALL_EXTS:
         ts = None
+        source = EVENT_KEY_SOURCE_MTIME
         if path.suffix.lower() in IMAGE_EXTS:
             ts = read_exif_datetime(path)
+            if ts is not None:
+                source = EVENT_KEY_SOURCE_EXIF
 
         # If EXIF is missing/unreadable (or for videos), fall back to file modified time.
         if ts is None:
@@ -148,15 +160,22 @@ def event_key_for_file(path: Path, use_exif_timestamps: bool = False) -> Optiona
                 ts = None
 
         if ts:
-            return ts.strftime("%Y%m%d_%H%M%S")
+            return ts.strftime("%Y%m%d_%H%M%S"), source
 
-    return None
+    return None, None
+
+
+def event_key_for_file(path: Path, use_exif_timestamps: bool = False) -> Optional[str]:
+    """Resolve a file to an event key (YYYYMMDD_HHMMSS)."""
+    event_key, _ = event_key_and_source_for_file(path, use_exif_timestamps=use_exif_timestamps)
+    return event_key
 
 
 def group_events(
     folder: Path,
     recursive: bool = True,
     use_exif_timestamps: bool = False,
+    event_source_map: Optional[dict[str, set[str]]] = None,
 ) -> dict[str, list[Path]]:
     """Group files by their base timestamp (the 'event key').
 
@@ -169,9 +188,11 @@ def group_events(
     for f in sorted(scan):
         if not f.is_file():
             continue
-        event_key = event_key_for_file(f, use_exif_timestamps=use_exif_timestamps)
+        event_key, source = event_key_and_source_for_file(f, use_exif_timestamps=use_exif_timestamps)
         if event_key:
             events[event_key].append(f)
+            if event_source_map is not None and source:
+                event_source_map.setdefault(event_key, set()).add(source)
     return dict(events)
 
 
@@ -298,6 +319,7 @@ def sort_files(
     video_match_mode: Literal["nearest", "minute"] = "nearest",
     progress_callback: Optional[Callable[[float], None]] = None,
     cancel_event: Optional[threading.Event] = None,
+    video_match_stats: Optional[dict[str, int]] = None,
 ) -> dict[str, int]:
     """Copy/move files into species subfolders, renamed to yyyy-mm-dd_HH-MM-SS_species.ext.
 
@@ -308,6 +330,12 @@ def sort_files(
     Returns counter {species_folder: count}.
     """
     stats: dict[str, int] = defaultdict(int)
+    local_video_match_stats: dict[str, int] = {
+        "video_only_events": 0,
+        "video_matched_nearest": 0,
+        "video_matched_minute": 0,
+        "video_unmatched": 0,
+    }
     action = shutil.move if move else shutil.copy2
     verb = "MOVE" if move else "COPY"
     reserved_destinations: set[str] = set()
@@ -334,10 +362,12 @@ def sort_files(
 
         rep = rep_map.get(event_key)
         if rep is None:
+            local_video_match_stats["video_only_events"] += 1
             species_name = None
             if video_match_mode == "minute":
                 species_name = minute_species.get(event_key[:13])
                 if species_name:
+                    local_video_match_stats["video_matched_minute"] += 1
                     log.debug(
                         "Event %s: video matched to '%s' by legacy minute bucket",
                         event_key,
@@ -354,6 +384,7 @@ def sort_files(
                     gap_s = abs((best_ts - event_ts).total_seconds())
                     if gap_s <= VIDEO_MATCH_MAX_GAP_SECONDS:
                         species_name = best_species
+                        local_video_match_stats["video_matched_nearest"] += 1
                         log.debug(
                             "Event %s: video matched to '%s' by nearest image event (%.0f sec gap)",
                             event_key,
@@ -362,6 +393,7 @@ def sort_files(
                         )
 
             if not species_name:
+                local_video_match_stats["video_unmatched"] += 1
                 if video_match_mode == "minute":
                     log.debug("Event %s: video-only, no image match within same minute, skipping", event_key)
                 else:
@@ -417,6 +449,10 @@ def sort_files(
 
             stats[species_name] += 1
 
+    if video_match_stats is not None:
+        video_match_stats.clear()
+        video_match_stats.update(local_video_match_stats)
+
     return dict(stats)
 
 
@@ -431,11 +467,40 @@ def write_report(
     rep_map: dict[str, Path],
     stats: dict[str, int],
     log: logging.Logger,
+    phase_timings: Optional[dict[str, float]] = None,
+    video_match_stats: Optional[dict[str, int]] = None,
+    grouping_source_stats: Optional[dict[str, int]] = None,
 ):
+    video_only_events = (
+        video_match_stats.get("video_only_events", 0)
+        if video_match_stats
+        else max(len(events) - len(rep_map), 0)
+    )
+    exif_events = grouping_source_stats.get("exif_derived_events", 0) if grouping_source_stats else 0
+    mtime_events = grouping_source_stats.get("mtime_derived_events", 0) if grouping_source_stats else 0
+
     report = {
         "generated": datetime.now().isoformat(),
         "total_events": len(events),
         "total_files_sorted": sum(stats.values()),
+        "summary": {
+            "classified_image_events": len(rep_map),
+            "video_only_events": video_only_events,
+            "exif_derived_events": exif_events,
+            "mtime_derived_events": mtime_events,
+        },
+        "timings_seconds": phase_timings or {},
+        "video_matching": video_match_stats or {
+            "video_only_events": video_only_events,
+            "video_matched_nearest": 0,
+            "video_matched_minute": 0,
+            "video_unmatched": 0,
+        },
+        "event_key_sources": grouping_source_stats or {
+            "filename_events": len(events),
+            "exif_derived_events": 0,
+            "mtime_derived_events": 0,
+        },
         "species_counts": dict(sorted(stats.items(), key=lambda x: -x[1])),
         "event_details": [],
     }
@@ -489,29 +554,67 @@ def run_sort(
     if progress_callback:
         progress_callback(0.0)
 
+    run_start = time.perf_counter()
+    phase_timings: dict[str, float] = {}
+
     log.info("Source : %s", source)
     log.info("Output : %s", dest_root)
     log.info("Mode   : %s", "MOVE" if move else "COPY")
     log.info("Video match mode: %s", video_match_mode)
     if use_exif_timestamps:
         log.info("EXIF fallback: enabled (for images without timestamp-style filenames)")
+    else:
+        log.warning(
+            "EXIF fallback: disabled (strict timestamp-style filenames only). "
+            "Non-matching files may be skipped."
+        )
     if dry_run:
         log.info("*** DRY RUN -- no files will be touched ***")
 
     # 1. Group files by event
     check()
     status("Scanning files…")
+    group_start = time.perf_counter()
+    event_source_map: dict[str, set[str]] = {}
     events = group_events(
         source,
         recursive=recursive,
         use_exif_timestamps=use_exif_timestamps,
+        event_source_map=event_source_map,
     )
+    phase_timings["group_events"] = time.perf_counter() - group_start
     if not events:
         log.warning("No matching files found in %s", source)
         return
 
+    filename_events = sum(
+        1 for srcs in event_source_map.values() if EVENT_KEY_SOURCE_FILENAME in srcs
+    )
+    exif_derived_events = sum(
+        1
+        for srcs in event_source_map.values()
+        if EVENT_KEY_SOURCE_FILENAME not in srcs and EVENT_KEY_SOURCE_EXIF in srcs
+    )
+    mtime_derived_events = sum(
+        1
+        for srcs in event_source_map.values()
+        if EVENT_KEY_SOURCE_FILENAME not in srcs and EVENT_KEY_SOURCE_EXIF not in srcs and EVENT_KEY_SOURCE_MTIME in srcs
+    )
+    grouping_source_stats = {
+        "filename_events": filename_events,
+        "exif_derived_events": exif_derived_events,
+        "mtime_derived_events": mtime_derived_events,
+    }
+
     total_files = sum(len(v) for v in events.values())
     log.info("Found %d events encompassing %d files", len(events), total_files)
+    if exif_derived_events or mtime_derived_events:
+        log.info(
+            "Event key sources: filename=%d, exif-derived=%d, mtime-derived=%d",
+            filename_events,
+            exif_derived_events,
+            mtime_derived_events,
+        )
     if progress_callback:
         progress_callback(0.05)
 
@@ -542,12 +645,16 @@ def run_sort(
 
     # 3. Load model & run inference (cannot be interrupted mid-inference)
     status("Loading model…")
+    load_start = time.perf_counter()
     model = load_model(log)
+    phase_timings["load_model"] = time.perf_counter() - load_start
     if progress_callback:
         progress_callback(0.20)
 
     status(f"Running inference on {len(images_to_classify)} images…")
+    inference_start = time.perf_counter()
     predictions = classify_images(model, images_to_classify, country, region, log)
+    phase_timings["inference"] = time.perf_counter() - inference_start
     if progress_callback:
         progress_callback(0.85)
 
@@ -563,6 +670,8 @@ def run_sort(
 
     # 4. Sort files
     status("Copying files…" if not dry_run else "Previewing (dry run)…")
+    sort_start = time.perf_counter()
+    video_match_stats: dict[str, int] = {}
     stats = sort_files(
         events, predictions, rep_map,
         dest_root, confidence, move, dry_run, log,
@@ -571,11 +680,31 @@ def run_sort(
         video_match_mode=video_match_mode,
         progress_callback=progress_callback,
         cancel_event=cancel_event,
+        video_match_stats=video_match_stats,
+    )
+    phase_timings["sort_files"] = time.perf_counter() - sort_start
+    phase_timings["total_pipeline"] = time.perf_counter() - run_start
+    log.info(
+        "Video matching: video-only=%d, matched-nearest=%d, matched-minute=%d, unmatched=%d",
+        video_match_stats.get("video_only_events", 0),
+        video_match_stats.get("video_matched_nearest", 0),
+        video_match_stats.get("video_matched_minute", 0),
+        video_match_stats.get("video_unmatched", 0),
     )
 
     # 5. Write report
     if not dry_run:
-        write_report(dest_root, events, predictions, rep_map, stats, log)
+        write_report(
+            dest_root,
+            events,
+            predictions,
+            rep_map,
+            stats,
+            log,
+            phase_timings=phase_timings,
+            video_match_stats=video_match_stats,
+            grouping_source_stats=grouping_source_stats,
+        )
 
     # Summary
     total_sorted = sum(stats.values())
@@ -587,6 +716,26 @@ def run_sort(
         log.info("%-36s  %5d", species, count)
     log.info("%-36s  %5d", "TOTAL", total_sorted)
     log.info("")
+    log.info(
+        "RUN SUMMARY | files=%d events=%d reps=%d video_only=%d sorted=%d review=%d exif_events=%d mtime_events=%d unmatched_video_only=%d",
+        total_files,
+        len(events),
+        len(rep_map),
+        max(len(events) - len(rep_map), 0),
+        total_sorted,
+        stats.get("Review", 0),
+        grouping_source_stats.get("exif_derived_events", 0),
+        grouping_source_stats.get("mtime_derived_events", 0),
+        video_match_stats.get("video_unmatched", 0),
+    )
+    log.info(
+        "TIMINGS (s) | group=%.2f load=%.2f inference=%.2f sort=%.2f total=%.2f",
+        phase_timings.get("group_events", 0.0),
+        phase_timings.get("load_model", 0.0),
+        phase_timings.get("inference", 0.0),
+        phase_timings.get("sort_files", 0.0),
+        phase_timings.get("total_pipeline", 0.0),
+    )
     log.info("Output: %s", dest_root)
 
     status(f"Complete — {total_sorted} file{'s' if total_sorted != 1 else ''} sorted")

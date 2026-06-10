@@ -1,4 +1,5 @@
 """Tests for sharpness-based frame selection."""
+import json
 import os
 import sys
 from datetime import datetime
@@ -8,7 +9,13 @@ import cv2
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from trailcam_sorter import group_events, pick_representative, score_sharpness, sort_files
+from trailcam_sorter import (
+    group_events,
+    pick_representative,
+    score_sharpness,
+    sort_files,
+    write_report,
+)
 
 
 def make_image(path: Path, blur_radius: int = 0) -> Path:
@@ -301,6 +308,96 @@ def test_video_only_event_skips_when_no_nearby_classified_event(tmp_path):
     assert sum(stats.values()) == 1
 
 
+def test_video_only_event_matches_at_exact_max_gap(tmp_path):
+    """Nearest mode should match when gap is exactly 60 seconds."""
+    import logging
+
+    src = tmp_path / "src"
+    src.mkdir()
+    dst = tmp_path / "dst"
+    dst.mkdir()
+
+    deer_img = make_image(src / "20240615_083000.jpg")
+    video_only = src / "20240615_083100.mp4"  # exactly 60 seconds away
+    video_only.touch()
+
+    events = {
+        "20240615_083000": [deer_img],
+        "20240615_083100": [video_only],
+    }
+    rep_map = {
+        "20240615_083000": deer_img,
+    }
+    predictions = {
+        str(deer_img): {"prediction": "mammalia;cervidae;odocoileus virginianus", "prediction_score": 0.9},
+    }
+
+    log = logging.getLogger("test")
+    stats = sort_files(
+        events=events,
+        predictions=predictions,
+        rep_map=rep_map,
+        dest_root=dst,
+        min_confidence=0.4,
+        move=False,
+        dry_run=False,
+        log=log,
+        sharpness=False,
+    )
+
+    deer_files = [f for f in (dst / "Odocoileus Virginianus").rglob("*.mp4")]
+    assert len(deer_files) == 1
+    assert stats["Odocoileus Virginianus"] == 2
+
+
+def test_video_only_event_tie_break_prefers_higher_confidence(tmp_path):
+    """When nearest gaps tie, higher-confidence candidate should win."""
+    import logging
+
+    src = tmp_path / "src"
+    src.mkdir()
+    dst = tmp_path / "dst"
+    dst.mkdir()
+
+    deer_img = make_image(src / "20240615_083000.jpg")
+    bear_img = make_image(src / "20240615_083010.jpg")
+    video_only = src / "20240615_083005.mp4"  # equidistant to both image events
+    video_only.touch()
+
+    events = {
+        "20240615_083000": [deer_img],
+        "20240615_083010": [bear_img],
+        "20240615_083005": [video_only],
+    }
+    rep_map = {
+        "20240615_083000": deer_img,
+        "20240615_083010": bear_img,
+    }
+    predictions = {
+        str(deer_img): {"prediction": "mammalia;cervidae;odocoileus virginianus", "prediction_score": 0.6},
+        str(bear_img): {"prediction": "mammalia;ursidae;ursus americanus", "prediction_score": 0.9},
+    }
+
+    log = logging.getLogger("test")
+    stats = sort_files(
+        events=events,
+        predictions=predictions,
+        rep_map=rep_map,
+        dest_root=dst,
+        min_confidence=0.4,
+        move=False,
+        dry_run=False,
+        log=log,
+        sharpness=False,
+    )
+
+    bear_files = [f for f in (dst / "Ursus Americanus").rglob("*.mp4")]
+    deer_files = [f for f in (dst / "Odocoileus Virginianus").rglob("*.mp4")]
+    assert len(bear_files) == 1
+    assert len(deer_files) == 0
+    assert stats["Ursus Americanus"] == 2
+
+
 def test_video_only_event_minute_mode_uses_legacy_bucket_behavior(tmp_path):
     """minute mode should preserve legacy same-minute overwrite behavior."""
     import logging
@@ -406,3 +503,61 @@ def test_group_events_falls_back_to_mtime_when_exif_missing(tmp_path):
 
     assert "20240615_083012" in events
     assert img in events["20240615_083012"]
+
+
+def test_write_report_includes_run_summary_metrics_and_timings(tmp_path):
+    import logging
+
+    src = tmp_path / "src"
+    src.mkdir()
+    dst = tmp_path / "dst"
+    dst.mkdir()
+
+    deer_img = make_image(src / "20240615_083000.jpg")
+    video_only = src / "20240615_083005.mp4"
+    video_only.touch()
+
+    events = {
+        "20240615_083000": [deer_img],
+        "20240615_083005": [video_only],
+    }
+    rep_map = {
+        "20240615_083000": deer_img,
+    }
+    predictions = {
+        str(deer_img): {"prediction": "mammalia;cervidae;odocoileus virginianus", "prediction_score": 0.9},
+    }
+    stats = {"Odocoileus Virginianus": 2}
+    phase_timings = {"group_events": 0.1, "load_model": 0.2, "inference": 0.3, "sort_files": 0.1}
+    video_stats = {
+        "video_only_events": 1,
+        "video_matched_nearest": 1,
+        "video_matched_minute": 0,
+        "video_unmatched": 0,
+    }
+    source_stats = {
+        "filename_events": 1,
+        "exif_derived_events": 1,
+        "mtime_derived_events": 0,
+    }
+
+    write_report(
+        dest_root=dst,
+        events=events,
+        predictions=predictions,
+        rep_map=rep_map,
+        stats=stats,
+        log=logging.getLogger("test"),
+        phase_timings=phase_timings,
+        video_match_stats=video_stats,
+        grouping_source_stats=source_stats,
+    )
+
+    report_path = dst / "_sort_report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+
+    assert report["summary"]["classified_image_events"] == 1
+    assert report["summary"]["video_only_events"] == 1
+    assert report["video_matching"]["video_matched_nearest"] == 1
+    assert report["event_key_sources"]["exif_derived_events"] == 1
+    assert report["timings_seconds"]["inference"] == 0.3
