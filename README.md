@@ -81,6 +81,12 @@ python trailcam_sorter.py "D:/TrailCam/June2024" --sharpest
 
 # Flat output — all files in one folder, no species subfolders
 python trailcam_sorter.py "D:/TrailCam/June2024" --no-subfolders
+
+# Scan top-level folder only, skip subfolders
+python trailcam_sorter.py "D:/TrailCam/June2024" --no-recursive
+
+# Verbose/debug output — shows per-file detail in the log
+python trailcam_sorter.py "D:/TrailCam/June2024" --verbose
 ```
 
 **All options:**
