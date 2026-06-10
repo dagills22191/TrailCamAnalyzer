@@ -137,6 +137,9 @@ python trailcam_sorter.py "D:/TrailCam/June2024" --event-window-seconds 30
 # Skip exact duplicate files by content hash
 python trailcam_sorter.py "D:/TrailCam/June2024" --dedupe-exact
 
+# Resume long runs from a local checkpoint file
+python trailcam_sorter.py "D:/TrailCam/June2024" --checkpoint-file "D:/TrailCam/sort-checkpoint.json" --resume-from-checkpoint
+
 # Flat output — all files in one folder, no species subfolders
 python trailcam_sorter.py "D:/TrailCam/June2024" --no-subfolders
 
@@ -174,6 +177,9 @@ optional:
   --event-window-seconds
                       Merge adjacent timestamp events within this many seconds (default: 0, disabled)
   --dedupe-exact      Skip exact duplicate files based on content hash
+  --checkpoint-file   Optional checkpoint JSON path for completed event keys
+  --resume-from-checkpoint
+                      Skip events already listed in --checkpoint-file
   --dry-run           Preview without touching any files
   -v, --verbose       Debug output
 ```

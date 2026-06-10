@@ -101,6 +101,28 @@ def save_config(data: dict):
     except Exception:
         pass
 
+def load_checkpoint(checkpoint_path: Path) -> set[str]:
+    """Load completed event keys from a checkpoint file."""
+    if not checkpoint_path.is_file():
+        return set()
+    try:
+        payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        keys = payload.get("completed_event_keys", []) if isinstance(payload, dict) else []
+        return {str(k) for k in keys}
+    except Exception:
+        return set()
+
+
+def save_checkpoint(checkpoint_path: Path, event_keys: set[str]):
+    """Persist completed event keys to a checkpoint file."""
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "updated": datetime.now().isoformat(),
+        "completed_event_keys": sorted(event_keys),
+        "count": len(event_keys),
+    }
+    checkpoint_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -424,6 +446,7 @@ class RunResult:
     exact_duplicates_skipped: int = 0
     report_path: Optional[Path] = None
     csv_report_path: Optional[Path] = None
+    checkpoint_path: Optional[Path] = None
 
 
 def compute_file_sha256(path: Path, chunk_size: int = 1024 * 1024) -> Optional[str]:
@@ -720,6 +743,8 @@ def run_sort(
     recursive: bool = True,
     event_window_seconds: int = 0,
     report_csv: Optional[Path] = None,
+    checkpoint_path: Optional[Path] = None,
+    resume_from_checkpoint: bool = False,
     progress_callback: Optional[Callable[[float], None]] = None,
     status_callback: Optional[Callable[[str], None]] = None,
     cancel_event: Optional[threading.Event] = None,
@@ -754,6 +779,10 @@ def run_sort(
         )
     if dry_run:
         log.info("*** DRY RUN -- no files will be touched ***")
+    if checkpoint_path:
+        log.info("Checkpoint file: %s", checkpoint_path)
+        if resume_from_checkpoint:
+            log.info("Resume mode: enabled")
 
     # 1. Group files by event
     check()
@@ -773,6 +802,15 @@ def run_sort(
     )
     if merged_sources is not None:
         event_source_map = merged_sources
+
+    completed_before: set[str] = set()
+    if checkpoint_path and resume_from_checkpoint:
+        completed_before = load_checkpoint(checkpoint_path)
+        if completed_before:
+            events = {k: v for k, v in events.items() if k not in completed_before}
+            event_source_map = {k: v for k, v in event_source_map.items() if k in events}
+            log.info("Resume filter: skipped %d previously completed events", len(completed_before))
+
     phase_timings["group_events"] = time.perf_counter() - group_start
     total_files = sum(len(v) for v in events.values())
     if not events:
@@ -800,6 +838,7 @@ def run_sort(
                 "exif_derived_events": 0,
                 "mtime_derived_events": 0,
             },
+            checkpoint_path=checkpoint_path,
         )
 
     filename_events = sum(
@@ -830,6 +869,7 @@ def run_sort(
             filename_events,
             exif_derived_events,
             mtime_derived_events,
+            checkpoint_path=checkpoint_path,
         )
     if progress_callback:
         progress_callback(0.05)
@@ -961,6 +1001,12 @@ def run_sort(
                 log=log,
                 csv_path=report_csv,
             )
+        if checkpoint_path:
+            completed_now = set(events.keys())
+            save_checkpoint(checkpoint_path, completed_before.union(completed_now))
+            log.info("Checkpoint updated with %d completed events", len(completed_before.union(completed_now)))
+    elif checkpoint_path:
+        log.info("Checkpoint not updated during dry run")
 
     # Summary
     total_sorted = sum(stats.values())
@@ -1016,6 +1062,7 @@ def run_sort(
         exact_duplicates_skipped=dedupe_stats.get("exact_duplicates_skipped", 0),
         report_path=report_path,
         csv_report_path=csv_report_path,
+        checkpoint_path=checkpoint_path,
     )
 
 
@@ -1498,6 +1545,10 @@ def main():
                         help="Skip exact duplicate files based on content hash.")
     parser.add_argument("--event-window-seconds", type=int, default=0,
                         help="Merge adjacent timestamp events within this gap in seconds (default: 0, disabled).")
+    parser.add_argument("--checkpoint-file", default=None,
+                        help="Optional checkpoint JSON path for completed event keys.")
+    parser.add_argument("--resume-from-checkpoint", action="store_true",
+                        help="Skip events already listed in --checkpoint-file.")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.set_defaults(use_exif_timestamps=True)
     args = parser.parse_args()
@@ -1551,6 +1602,8 @@ def main():
         recursive=not args.no_recursive,
         event_window_seconds=args.event_window_seconds,
         report_csv=Path(args.report_csv).resolve() if args.report_csv else None,
+        checkpoint_path=Path(args.checkpoint_file).resolve() if args.checkpoint_file else None,
+        resume_from_checkpoint=args.resume_from_checkpoint,
     )
 
 

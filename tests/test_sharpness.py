@@ -14,11 +14,13 @@ from trailcam_sorter import (
     classify_with_backend,
     group_events,
     load_classifier_backend,
+    load_checkpoint,
     merge_events_within_window,
     pick_representative,
     RunResult,
     resolve_confidence_threshold,
     score_sharpness,
+    save_checkpoint,
     sort_files,
     write_report,
     write_species_csv,
@@ -652,6 +654,7 @@ def test_run_result_dataclass_defaults_paths_none():
     assert result.exact_duplicates_skipped == 0
     assert result.report_path is None
     assert result.csv_report_path is None
+    assert result.checkpoint_path is None
 
 
 def test_resolve_confidence_threshold_uses_profile_when_value_missing():
@@ -680,6 +683,22 @@ def test_backend_wrapper_rejects_unknown_backend(tmp_path):
             region=None,
             log=logging.getLogger("test"),
         )
+
+
+def test_checkpoint_helpers_round_trip(tmp_path):
+    checkpoint_path = tmp_path / "checkpoint.json"
+    keys = {"20240615_083012", "20240615_083013"}
+
+    save_checkpoint(checkpoint_path, keys)
+    loaded = load_checkpoint(checkpoint_path)
+
+    assert loaded == keys
+
+
+def test_checkpoint_helpers_missing_file_returns_empty(tmp_path):
+    checkpoint_path = tmp_path / "missing.json"
+    loaded = load_checkpoint(checkpoint_path)
+    assert loaded == set()
 
 
 def test_merge_events_within_window_disabled_returns_original(tmp_path):
