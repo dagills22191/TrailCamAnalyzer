@@ -6,7 +6,7 @@ Automatically identifies animals in trail camera photos and videos using Google 
 
 - Identifies 2000+ species (plus vehicles, birds, etc.) using Google SpeciesNet — runs on CPU, no GPU required
 - Classifies one representative image per trigger event, then applies the same label to every file in that burst (variants `_1`, `_2`, associated `.mp4`)
-- Matches video-only events to classified image events fired within the same minute
+- Matches video-only events to the nearest confidently classified image event (up to 60 seconds apart)
 - Renames all output files to `yyyy-mm-dd_HH-MM-SS_Species Name.ext` for easy browsing and sorting
 - Skips blank frames; routes uncertain or low-confidence results to a `Review/` folder for manual inspection
 - **Copy or move** — non-destructive copy by default, or move to save disk space
@@ -14,6 +14,7 @@ Automatically identifies animals in trail camera photos and videos using Google 
 - **Geofencing** — optionally filter predictions by country and US state to improve accuracy in your region
 - **Confidence threshold** — tune how certain the model needs to be before filing a result (default 0.4)
 - **Sharpest frame selection** — when your camera fires bursts, scores each frame for sharpness and keeps only the clearest one
+- **EXIF timestamp fallback** — optionally use image EXIF capture date/time when filenames do not follow the expected timestamp pattern
 - **Recursive or top-level scan** — walk the full source folder tree, or scan only the top-level folder
 - **Dry run mode** — preview exactly what would be copied/moved without touching any files
 - **Verbose logging** — per-file debug output for troubleshooting
@@ -66,6 +67,31 @@ conda activate trailcam
 pip install -r requirements.txt
 ```
 
+## Developer quickstart
+
+```bash
+# from repo root
+conda create -n trailcam python=3.11 pip -y
+conda activate trailcam
+pip install -r requirements.txt
+
+# run tests
+python -m pytest -q
+```
+
+### Building the Windows installer
+
+```powershell
+# from repo root
+.\installer\build.ps1
+```
+
+Notes:
+- The build script now auto-detects `pyinstaller` and Inno Setup (`ISCC.exe`) where possible.
+- You can override tool paths:
+  - `./installer/build.ps1 -PyInstallerExe "C:/path/to/pyinstaller.exe" -InnoExe "C:/path/to/ISCC.exe"`
+- Use `-SkipInstaller` to build only `dist/TrailCamSorter/`.
+
 ## Usage
 
 **GUI (recommended):**
@@ -81,11 +107,20 @@ python trailcam_sorter.py "D:/TrailCam/June2024" --dry-run
 # Copy files with optional geofencing
 python trailcam_sorter.py "D:/TrailCam/June2024" --country USA --region VA
 
+# Use legacy minute-based video-only matching (rollout safety switch)
+python trailcam_sorter.py "D:/TrailCam/June2024" --video-match-mode minute
+
 # Move instead of copy, custom output folder, lower confidence threshold
 python trailcam_sorter.py "D:/TrailCam/June2024" --move -o "E:/Sorted" --confidence 0.3
 
 # Copy only the sharpest frame from each burst (reduces output volume)
 python trailcam_sorter.py "D:/TrailCam/June2024" --sharpest
+
+# EXIF fallback is enabled by default (good for raw SD-card imports)
+python trailcam_sorter.py "D:/TrailCam/June2024" --use-exif-timestamps
+
+# Advanced: disable fallback only if you intentionally want strict filename-only parsing
+python trailcam_sorter.py "D:/TrailCam/June2024" --no-exif-timestamps
 
 # Flat output — all files in one folder, no species subfolders
 python trailcam_sorter.py "D:/TrailCam/June2024" --no-subfolders
@@ -111,9 +146,43 @@ optional:
   --no-subfolders     Put all files flat in the output folder instead of species subfolders
   --no-recursive      Scan only the top-level source folder; ignore subfolders
   --sharpest          Copy only the sharpest frame per burst (blur detection). Videos always included.
+  --video-match-mode  Video-only match strategy: nearest (default) or minute (legacy)
+  --use-exif-timestamps
+                      Use image EXIF date/time when filenames don't match expected timestamp format (default: on)
+  --no-exif-timestamps
+                      Advanced: disable fallback and require strict timestamp-style filenames only
   --dry-run           Preview without touching any files
   -v, --verbose       Debug output
 ```
+
+## Evaluation script (A/B comparison)
+
+Use this helper to compare video-only assignments between legacy `minute` mode and new `nearest` mode on the same dataset.
+
+```bash
+python scripts/compare_video_match_modes.py "D:/TrailCam/June2024"
+
+# optional geofencing + CSV output for manual audit
+python scripts/compare_video_match_modes.py "D:/TrailCam/June2024" --country USA --region VA --csv "D:/TrailCam/compare.csv"
+```
+
+## Benchmark script
+
+Use this helper to measure performance and record hardware metadata (CPU/GPU), event counts, and timing breakdown.
+
+```bash
+# fast benchmark (classifies first 200 representative images)
+python scripts/benchmark_sorter.py "D:/TrailCam/June2024"
+
+# full benchmark, persist JSON report
+python scripts/benchmark_sorter.py "D:/TrailCam/June2024" --full-inference --report-json "D:/TrailCam/benchmark.json"
+```
+
+The benchmark report includes:
+- CPU and GPU details
+- total files/events/representative images
+- per-phase timing (`group_events`, `load_model`, `inference`, `sort_files`)
+- total elapsed time and inference throughput
 
 ## File naming convention
 
@@ -125,7 +194,8 @@ The sorter expects standard trail cam filenames:
 20240615_083012.mp4      video
 ```
 
-Files that don't match this pattern are ignored.
+Files that don't match this pattern use EXIF/modified-time fallback by default.
+Use `--no-exif-timestamps` to force strict filename-only behavior.
 
 ## Notes
 
@@ -134,3 +204,6 @@ Files that don't match this pattern are ignored.
 - On Windows, run inside a `conda activate trailcam` session or use the full Python path
 - **Geofencing** (`--country`/`--region`) applies a geographic range prior from wildlife databases. Use ISO 3166-1 alpha-3 codes for country (e.g. `USA`, not `US`) and 2-letter state abbreviations for region (e.g. `VA`, not `US-VA`). Region is only supported for USA. Leaving both blank is safe.
 - **Sharpness / blur detection** (`--sharpest`) scores each image in a burst using Laplacian variance and keeps only the highest-scoring frame. Useful for reducing output when your camera fires 3–5 shots per trigger. Videos are always copied regardless of this setting.
+- **EXIF timestamp fallback** is enabled by default and lets non-standard image filenames (for example `DSCF0001.JPG`) still be grouped and named by capture time. If EXIF is unavailable/unreadable, file modified time is used as a fallback. These derived times are also used in output filenames. Use `--no-exif-timestamps` for strict filename-only behavior.
+- `--no-exif-timestamps` is an advanced troubleshooting option. Most users should leave fallback enabled, especially when importing directly from SD cards.
+- **Dry run naming** simulates collision handling, so planned destination names include suffixes (`_2`, `_3`, etc.) just like real runs when files already exist.

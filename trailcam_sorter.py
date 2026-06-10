@@ -11,7 +11,8 @@ Usage
 -----
     python trailcam_sorter.py                        # GUI
     python trailcam_sorter.py "D:\\TrailCam\\June2026"
-    python trailcam_sorter.py "D:\\TrailCam\\June2026" --country US --dry-run
+    python trailcam_sorter.py "D:\\TrailCam\\June2026" --country USA --dry-run
+    python trailcam_sorter.py "D:\\TrailCam\\June2026" --use-exif-timestamps
     python trailcam_sorter.py "D:\\TrailCam\\June2026" --confidence 0.5 --move
 """
 
@@ -32,7 +33,7 @@ import time
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Literal, Optional
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -55,6 +56,9 @@ US_STATES = [
 ]
 VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv"}
 ALL_EXTS = IMAGE_EXTS | VIDEO_EXTS
+VIDEO_MATCH_MAX_GAP_SECONDS = 60
+VIDEO_MATCH_MODES = ("nearest", "minute")
+EXIF_DATETIME_TAGS = ("DateTimeOriginal", "DateTimeDigitized", "DateTime")
 
 # Matches: 20240615_083012.jpg, 20240615_083012_1.jpg, 20240615_083012_2.mp4
 EVENT_PATTERN = re.compile(
@@ -101,19 +105,73 @@ def sanitize_label(label: str) -> str:
     return name.strip().title() if name else "Unknown"
 
 
-def group_events(folder: Path, recursive: bool = True) -> dict[str, list[Path]]:
+def read_exif_datetime(path: Path) -> Optional[datetime]:
+    """Read image capture time from EXIF metadata, if present."""
+    try:
+        from PIL import Image
+        from PIL.ExifTags import TAGS
+
+        with Image.open(path) as img:
+            exif = img.getexif()
+            if not exif:
+                return None
+
+            for tag_id, value in exif.items():
+                tag_name = TAGS.get(tag_id, str(tag_id))
+                if tag_name in EXIF_DATETIME_TAGS and isinstance(value, str):
+                    text = value.strip()
+                    try:
+                        return datetime.strptime(text, "%Y:%m:%d %H:%M:%S")
+                    except ValueError:
+                        continue
+    except Exception:
+        return None
+    return None
+
+
+def event_key_for_file(path: Path, use_exif_timestamps: bool = False) -> Optional[str]:
+    """Resolve a file to an event key (YYYYMMDD_HHMMSS)."""
+    m = EVENT_PATTERN.match(path.name)
+    if m and path.suffix.lower() in ALL_EXTS:
+        return m.group(1)
+
+    if use_exif_timestamps and path.suffix.lower() in ALL_EXTS:
+        ts = None
+        if path.suffix.lower() in IMAGE_EXTS:
+            ts = read_exif_datetime(path)
+
+        # If EXIF is missing/unreadable (or for videos), fall back to file modified time.
+        if ts is None:
+            try:
+                ts = datetime.fromtimestamp(path.stat().st_mtime)
+            except Exception:
+                ts = None
+
+        if ts:
+            return ts.strftime("%Y%m%d_%H%M%S")
+
+    return None
+
+
+def group_events(
+    folder: Path,
+    recursive: bool = True,
+    use_exif_timestamps: bool = False,
+) -> dict[str, list[Path]]:
     """Group files by their base timestamp (the 'event key').
 
     Returns {event_key: [file1, file2, ...]} where event_key = "20240615_083012".
+    If use_exif_timestamps=True, non-matching files use EXIF capture time when
+    available (images), otherwise file modified time.
     """
     events: dict[str, list[Path]] = defaultdict(list)
     scan = folder.rglob("*") if recursive else folder.glob("*")
     for f in sorted(scan):
         if not f.is_file():
             continue
-        m = EVENT_PATTERN.match(f.name)
-        if m and f.suffix.lower() in ALL_EXTS:
-            events[m.group(1)].append(f)
+        event_key = event_key_for_file(f, use_exif_timestamps=use_exif_timestamps)
+        if event_key:
+            events[event_key].append(f)
     return dict(events)
 
 
@@ -154,6 +212,23 @@ def score_sharpness(path: Path) -> float:
         return float(cv2.Laplacian(img, cv2.CV_64F).var())
     except Exception:
         return 0.0
+
+
+def is_cv2_available() -> bool:
+    """Return True when OpenCV is importable in this environment."""
+    try:
+        import cv2  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def parse_event_key_timestamp(event_key: str) -> Optional[datetime]:
+    """Parse event key like 20240615_083012 into a datetime."""
+    try:
+        return datetime.strptime(event_key, "%Y%m%d_%H%M%S")
+    except ValueError:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -220,28 +295,35 @@ def sort_files(
     log: logging.Logger,
     subfolders: bool = True,
     sharpness: bool = False,
+    video_match_mode: Literal["nearest", "minute"] = "nearest",
     progress_callback: Optional[Callable[[float], None]] = None,
     cancel_event: Optional[threading.Event] = None,
 ) -> dict[str, int]:
     """Copy/move files into species subfolders, renamed to yyyy-mm-dd_HH-MM-SS_species.ext.
 
     Blank predictions are skipped. Low-confidence/unknown go to Review/.
-    Video-only events are matched to classified image events by minute.
+    Video-only events are matched by the selected strategy:
+    - nearest: nearest confidently classified image event within VIDEO_MATCH_MAX_GAP_SECONDS
+    - minute: legacy minute-bucket matching
     Returns counter {species_folder: count}.
     """
     stats: dict[str, int] = defaultdict(int)
     action = shutil.move if move else shutil.copy2
     verb = "MOVE" if move else "COPY"
+    reserved_destinations: set[str] = set()
 
-    # Build minute-level species lookup (YYYYMMDD_HHMM -> species)
+    # Build candidates for video-only matching from confidently classified image events.
     minute_species: dict[str, str] = {}
+    video_match_candidates: list[tuple[datetime, str, float]] = []
     for ek in rep_map:
         pred = predictions.get(str(rep_map[ek]), {})
         lbl = pred.get("prediction", "")
         sc = pred.get("prediction_score", 0.0) or 0.0
         sp = sanitize_label(lbl) if lbl else ""
-        if sp and sp.lower() != "blank" and sc >= min_confidence and "unknown" not in lbl.lower():
+        ts = parse_event_key_timestamp(ek)
+        if ts and sp and sp.lower() != "blank" and sc >= min_confidence and "unknown" not in lbl.lower():
             minute_species[ek[:13]] = sp
+            video_match_candidates.append((ts, sp, float(sc)))
 
     total_events = len(events)
     for i, (event_key, files) in enumerate(events.items()):
@@ -252,11 +334,43 @@ def sort_files(
 
         rep = rep_map.get(event_key)
         if rep is None:
-            species_name = minute_species.get(event_key[:13])
+            species_name = None
+            if video_match_mode == "minute":
+                species_name = minute_species.get(event_key[:13])
+                if species_name:
+                    log.debug(
+                        "Event %s: video matched to '%s' by legacy minute bucket",
+                        event_key,
+                        species_name,
+                    )
+            else:
+                event_ts = parse_event_key_timestamp(event_key)
+                if event_ts and video_match_candidates:
+                    ranked = sorted(
+                        video_match_candidates,
+                        key=lambda c: (abs((c[0] - event_ts).total_seconds()), -c[2]),
+                    )
+                    best_ts, best_species, _ = ranked[0]
+                    gap_s = abs((best_ts - event_ts).total_seconds())
+                    if gap_s <= VIDEO_MATCH_MAX_GAP_SECONDS:
+                        species_name = best_species
+                        log.debug(
+                            "Event %s: video matched to '%s' by nearest image event (%.0f sec gap)",
+                            event_key,
+                            species_name,
+                            gap_s,
+                        )
+
             if not species_name:
-                log.debug("Event %s: video-only, no image match within same minute, skipping", event_key)
+                if video_match_mode == "minute":
+                    log.debug("Event %s: video-only, no image match within same minute, skipping", event_key)
+                else:
+                    log.debug(
+                        "Event %s: video-only, no image match within %d seconds, skipping",
+                        event_key,
+                        VIDEO_MATCH_MAX_GAP_SECONDS,
+                    )
                 continue
-            log.debug("Event %s: video matched to '%s' by minute", event_key, species_name)
         else:
             pred = predictions.get(str(rep), {})
             label = pred.get("prediction", "")
@@ -286,11 +400,13 @@ def sort_files(
 
         for f in files_to_copy:
             ext = f.suffix.lower()
-            dst = target_dir / f"{date_str}_{time_str}_{species_name}{ext}"
+            stem = f"{date_str}_{time_str}_{species_name}"
+            dst = target_dir / f"{stem}{ext}"
             i2 = 2
-            while dst.exists():
-                dst = target_dir / f"{date_str}_{time_str}_{species_name}_{i2}{ext}"
+            while dst.exists() or str(dst) in reserved_destinations:
+                dst = target_dir / f"{stem}_{i2}{ext}"
                 i2 += 1
+            reserved_destinations.add(str(dst))
 
             if dry_run:
                 log.debug("[DRY RUN] %s  %s  ->  %s/%s", verb, f.name, species_name, dst.name)
@@ -354,6 +470,8 @@ def run_sort(
     log: logging.Logger,
     subfolders: bool = True,
     sharpness: bool = False,
+    video_match_mode: Literal["nearest", "minute"] = "nearest",
+    use_exif_timestamps: bool = True,
     recursive: bool = True,
     progress_callback: Optional[Callable[[float], None]] = None,
     status_callback: Optional[Callable[[str], None]] = None,
@@ -374,13 +492,20 @@ def run_sort(
     log.info("Source : %s", source)
     log.info("Output : %s", dest_root)
     log.info("Mode   : %s", "MOVE" if move else "COPY")
+    log.info("Video match mode: %s", video_match_mode)
+    if use_exif_timestamps:
+        log.info("EXIF fallback: enabled (for images without timestamp-style filenames)")
     if dry_run:
         log.info("*** DRY RUN -- no files will be touched ***")
 
     # 1. Group files by event
     check()
     status("Scanning files…")
-    events = group_events(source, recursive=recursive)
+    events = group_events(
+        source,
+        recursive=recursive,
+        use_exif_timestamps=use_exif_timestamps,
+    )
     if not events:
         log.warning("No matching files found in %s", source)
         return
@@ -407,6 +532,10 @@ def run_sort(
     if not images_to_classify:
         log.warning("No images to classify -- nothing to do.")
         return
+
+    if sharpness and not is_cv2_available():
+        log.warning("--sharpest enabled but OpenCV (cv2) is not available; "
+                    "falling back to default representative selection.")
 
     if progress_callback:
         progress_callback(0.10)
@@ -439,6 +568,7 @@ def run_sort(
         dest_root, confidence, move, dry_run, log,
         subfolders=subfolders,
         sharpness=sharpness,
+        video_match_mode=video_match_mode,
         progress_callback=progress_callback,
         cancel_event=cancel_event,
     )
@@ -679,6 +809,12 @@ class TrailCamGUI:
             fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
         ).pack(side="left")
 
+        self.exif_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            chk_row, text="Use EXIF/modified-time fallback (recommended)", variable=self.exif_var,
+            fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
+        ).pack(side="left", padx=(22, 0))
+
         # ── Run controls ─────────────────────────────────────────────────
         section_header("RUN")
         run_card = ctk.CTkFrame(self.root, fg_color=CARD, corner_radius=8)
@@ -858,6 +994,7 @@ class TrailCamGUI:
                     subfolders=self.subfolders_var.get(),
                     sharpness=self.sharpness_var.get(),
                     recursive=self.recursive_var.get(),
+                    use_exif_timestamps=self.exif_var.get(),
                     progress_callback=lambda v: self._q.put(("progress", v)),
                     status_callback=lambda s: self._q.put(("status", s)),
                     cancel_event=self._cancel_event,
@@ -912,8 +1049,18 @@ def main():
                              "Videos are always included. Default: off.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Preview without touching files.")
+    parser.add_argument("--video-match-mode", choices=VIDEO_MATCH_MODES, default="nearest",
+                        help="Video-only matching strategy: nearest (default) or minute (legacy behavior).")
+    parser.add_argument("--use-exif-timestamps", action="store_true", dest="use_exif_timestamps",
+                        help="Use EXIF/modified-time fallback for non-standard filenames (recommended, default: on).")
+    parser.add_argument("--no-exif-timestamps", action="store_false", dest="use_exif_timestamps",
+                        help="Advanced: disable fallback and require strict timestamp-style filenames only.")
     parser.add_argument("-v", "--verbose", action="store_true")
+    parser.set_defaults(use_exif_timestamps=True)
     args = parser.parse_args()
+
+    if args.region and (args.country or "").upper() != "USA":
+        parser.error("--region requires --country USA")
 
     level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(format=LOG_FMT, level=level, stream=sys.stdout)
@@ -936,6 +1083,8 @@ def main():
         log=log,
         subfolders=not args.no_subfolders,
         sharpness=args.sharpest,
+        video_match_mode=args.video_match_mode,
+        use_exif_timestamps=args.use_exif_timestamps,
         recursive=not args.no_recursive,
     )
 
