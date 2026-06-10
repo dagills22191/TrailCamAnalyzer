@@ -73,7 +73,8 @@ CONFIG_PATH = Path.home() / ".trailcam_sorter.json"
 def load_config() -> dict:
     try:
         return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    except Exception:
+    except Exception as e:
+        logging.debug("Could not load config from %s: %s", CONFIG_PATH, e)
         return {}
 
 
@@ -82,8 +83,8 @@ def save_config(data: dict):
         existing = load_config()
         existing.update(data)
         CONFIG_PATH.write_text(json.dumps(existing, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as e:
+        logging.debug("Could not save config to %s: %s", CONFIG_PATH, e)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -259,6 +260,7 @@ def sort_files(
     stats: dict[str, int] = defaultdict(int)
     action = shutil.move if move else shutil.copy2
     verb = "MOVE" if move else "COPY"
+    reserved: set[str] = set()  # tracks claimed destination paths within this run
 
     # Build minute-level species lookup (YYYYMMDD_HHMM -> species)
     minute_species: dict[str, str] = {}
@@ -315,9 +317,10 @@ def sort_files(
             ext = f.suffix.lower()
             dst = target_dir / f"{date_str}_{time_str}_{species_name}{ext}"
             i2 = 2
-            while dst.exists():
+            while dst.exists() or str(dst) in reserved:
                 dst = target_dir / f"{date_str}_{time_str}_{species_name}_{i2}{ext}"
                 i2 += 1
+            reserved.add(str(dst))
 
             if dry_run:
                 log.debug("[DRY RUN] %s  %s  ->  %s/%s", verb, f.name, species_name, dst.name)
@@ -403,6 +406,16 @@ def run_sort(
     log.info("Mode   : %s", "MOVE" if move else "COPY")
     if dry_run:
         log.info("*** DRY RUN -- no files will be touched ***")
+
+    if sharpness:
+        try:
+            import cv2  # noqa: F401
+        except ImportError:
+            log.warning(
+                "--sharpest requested but opencv-python is not installed; "
+                "all frames will score 0.0 and the first image in each burst will be used. "
+                "Fix with: pip install opencv-python"
+            )
 
     # 1. Group files by event
     check()

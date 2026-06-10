@@ -142,6 +142,52 @@ Output files are always renamed to `yyyy-mm-dd_HH-MM-SS_Species Name.ext` regard
 - **Geofencing** (`--country`/`--region`) applies a geographic range prior from wildlife databases. Use ISO 3166-1 alpha-3 codes for country (e.g. `USA`, not `US`) and 2-letter state abbreviations for region (e.g. `VA`, not `US-VA`). Region is only supported for USA. Leaving both blank is safe.
 - **Sharpness / blur detection** (`--sharpest`) scores each image in a burst using Laplacian variance and keeps only the highest-scoring frame. Useful for reducing output when your camera fires 3–5 shots per trigger. Videos are always copied regardless of this setting.
 
+## Contributing / Development
+
+### Environment setup
+
+```bash
+conda create -n trailcam python=3.11 pip -y
+conda activate trailcam
+pip install -r requirements.txt
+```
+
+### Running tests
+
+```bash
+python -m pytest tests/ -v
+```
+
+Expected output: all tests pass (currently 21).
+
+### Building the Windows executable and installer
+
+From the project root (requires Inno Setup 6):
+
+```powershell
+.\installer\build.ps1
+```
+
+Optional parameters:
+```powershell
+.\installer\build.ps1 -CondaEnv trailcam -InnoExe "C:\path\to\ISCC.exe"
+```
+
+Outputs:
+- `installer\dist\TrailCamSorter\` — portable folder (~2–3 GB, PyTorch included)
+- `installer\Output\TrailCamSorter-Setup.exe` — Windows installer (~207 MB)
+
+### Compatibility
+
+| | Confirmed |
+|---|---|
+| OS | Windows 10/11 |
+| Python | 3.11 |
+| GPU | Optional — NVIDIA CUDA auto-detected; CPU fallback always works |
+| Model weights | ~1 GB, downloaded once to `%USERPROFILE%\.cache\kagglehub\` |
+
+---
+
 ## Troubleshooting
 
 **First run is slow or seems stuck**
