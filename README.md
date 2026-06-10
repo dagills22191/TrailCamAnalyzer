@@ -14,14 +14,20 @@ Automatically identifies animals in trail camera photos and videos using Google 
 **Output structure:**
 ```
 ~/TrailCamAnimals/
-  Odocoileus Virginianus/
-    2024-06-15_08-30-12_Odocoileus Virginianus.jpg
-    2024-06-15_08-30-12_Odocoileus Virginianus_2.jpg
-    2024-06-15_08-30-12_Odocoileus Virginianus.mp4
-  Procyon Lotor/
-    2024-06-16_19-45-03_Procyon Lotor.jpg
+  White-Tailed Deer/
+    2022-10-08_19-15-28_White-Tailed Deer.jpg
+    2022-10-08_19-15-28_White-Tailed Deer_2.jpg
+    2022-10-08_19-15-28_White-Tailed Deer.mp4
+  American Black Bear/
+    2022-04-11_20-00-08_American Black Bear.jpg
+  Bobcat/
+    2022-03-25_17-23-53_Bobcat.jpg
+  Coyote/
+    2022-03-21_14-39-20_Coyote.jpg
+  Vehicle/
+    2022-03-26_15-12-03_Vehicle.jpg
   Review/
-    2024-06-17_07-12-44_Review.jpg
+    2022-06-17_07-12-44_Review.jpg
   _sort_report.json
 ```
 
