@@ -40,9 +40,9 @@ Automatically identifies animals in trail camera photos and videos using Google 
 
 ## Installation
 
-### Option A: Standalone executable (Windows)
+### Option A: Windows installer (recommended)
 
-Download and unzip `TrailCamSorter.zip`, then run `TrailCamSorter.exe`. No Python or conda required. Model weights (~1 GB) are downloaded on first run.
+Download `TrailCamSorter-Setup.exe` from the [Releases](../../releases) page and run it. The setup wizard installs the app to Program Files, creates a Start Menu shortcut, and registers an uninstaller. No Python or conda required. Model weights (~1 GB) are downloaded on first run.
 
 ### Option B: From source
 

@@ -17,6 +17,10 @@ sort.bat
 # Output
 _sort_report.json
 
+# Installer build artifacts
+installer/output/
+installer/__pycache__/
+
 # Claude Code project instructions (local only)
 CLAUDE.md
 
