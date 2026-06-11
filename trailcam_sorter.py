@@ -869,7 +869,6 @@ def run_sort(
             filename_events,
             exif_derived_events,
             mtime_derived_events,
-            checkpoint_path=checkpoint_path,
         )
     if progress_callback:
         progress_callback(0.05)

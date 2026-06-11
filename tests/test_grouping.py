@@ -9,7 +9,7 @@ import pytest
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from trailcam_sorter import group_events, _event_key_from_exif, _event_key_from_mtime
+from trailcam_sorter import event_key_and_source_for_file, group_events, read_exif_datetime
 
 
 # ---------------------------------------------------------------------------
@@ -33,33 +33,35 @@ def make_jpeg_with_exif(path: Path, dt: datetime) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# _event_key_from_exif
+# read_exif_datetime
 # ---------------------------------------------------------------------------
 
-def test_exif_key_returns_correct_format(tmp_path):
+def test_exif_datetime_returns_datetime(tmp_path):
     dt = datetime(2024, 6, 15, 8, 30, 12)
     p = make_jpeg_with_exif(tmp_path / "shot.jpg", dt)
-    key = _event_key_from_exif(p)
-    assert key == "20240615_083012"
+    exif_dt = read_exif_datetime(p)
+    assert exif_dt == dt
 
 
-def test_exif_key_returns_none_for_no_exif(tmp_path):
+def test_exif_datetime_returns_none_for_no_exif(tmp_path):
     p = make_jpeg(tmp_path / "noexif.jpg")
-    assert _event_key_from_exif(p) is None
+    assert read_exif_datetime(p) is None
 
 
-def test_exif_key_returns_none_for_missing_file():
-    assert _event_key_from_exif(Path("/nonexistent/file.jpg")) is None
+def test_exif_datetime_returns_none_for_missing_file(tmp_path):
+    assert read_exif_datetime(tmp_path / "missing.jpg") is None
 
 
 # ---------------------------------------------------------------------------
-# _event_key_from_mtime
+# event_key_and_source_for_file
 # ---------------------------------------------------------------------------
 
-def test_mtime_key_returns_yyyymmdd_format(tmp_path):
+def test_mtime_fallback_returns_yyyymmdd_hhmmss_format(tmp_path):
     p = tmp_path / "video.mp4"
     p.touch()
-    key = _event_key_from_mtime(p)
+    key, source = event_key_and_source_for_file(p, use_exif_timestamps=True)
+    assert source == "mtime"
+    assert key is not None
     assert len(key) == 15                     # YYYYMMDD_HHMMSS
     assert key[8] == "_"
     datetime.strptime(key, "%Y%m%d_%H%M%S")  # raises if format is wrong
@@ -92,7 +94,7 @@ def test_group_events_multiple_events(tmp_path):
 def test_group_events_exif_fallback(tmp_path):
     dt = datetime(2024, 6, 15, 8, 30, 12)
     make_jpeg_with_exif(tmp_path / "DSCF0001.JPG", dt)
-    events = group_events(tmp_path)
+    events = group_events(tmp_path, use_exif_timestamps=True)
     assert "20240615_083012" in events
 
 
@@ -100,7 +102,7 @@ def test_group_events_exif_groups_same_second(tmp_path):
     dt = datetime(2024, 6, 15, 8, 30, 12)
     make_jpeg_with_exif(tmp_path / "DSCF0001.JPG", dt)
     make_jpeg_with_exif(tmp_path / "DSCF0002.JPG", dt)
-    events = group_events(tmp_path)
+    events = group_events(tmp_path, use_exif_timestamps=True)
     assert len(events) == 1
     assert len(list(events.values())[0]) == 2
 
@@ -108,7 +110,7 @@ def test_group_events_exif_groups_same_second(tmp_path):
 def test_group_events_mtime_fallback_for_video(tmp_path):
     v = tmp_path / "MOV0001.mp4"
     v.touch()
-    events = group_events(tmp_path)
+    events = group_events(tmp_path, use_exif_timestamps=True)
     assert len(events) == 1
 
 
