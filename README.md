@@ -10,12 +10,17 @@ Automatically identifies animals in trail camera photos and videos using Google 
 - Renames all output files to `yyyy-mm-dd_HH-MM-SS_Species Name.ext` for easy browsing and sorting
 - Skips blank frames; routes uncertain or low-confidence results to a `Review/` folder for manual inspection
 - **Copy or move** — non-destructive copy by default, or move to save disk space
+- **Basic / Advanced GUI modes** — simple one-click interface by default; toggle Advanced for expert controls
 - **Species subfolders** — organises output into one folder per species, or dump flat into a single folder
 - **Geofencing** — optionally filter predictions by country and US state to improve accuracy in your region
 - **Confidence threshold** — tune how certain the model needs to be before filing a result (default 0.4)
 - **Sharpest frame selection** — when your camera fires bursts, scores each frame for sharpness and keeps only the clearest one
 - **EXIF timestamp fallback** — optionally use image EXIF capture date/time when filenames do not follow the expected timestamp pattern
 - **Recursive or top-level scan** — walk the full source folder tree, or scan only the top-level folder
+- **Event merge window** — group images shot within N seconds of each other into a single event
+- **Exact duplicate detection** — skip byte-identical files based on content hash to avoid redundant copies
+- **Checkpoint / resume** — save progress to a file and resume interrupted runs without reprocessing completed events
+- **CSV summary report** — optionally write species/category counts to a CSV for spreadsheet analysis
 - **Dry run mode** — preview exactly what would be copied/moved without touching any files
 - **Verbose logging** — per-file debug output for troubleshooting
 - Saves a `_sort_report.json` summary with species counts and per-event details
@@ -38,11 +43,13 @@ Automatically identifies animals in trail camera photos and videos using Google 
   Review/
     2022-06-17_07-12-44_Review.jpg
   _sort_report.json
+  _sort_dashboard.html  (optional, via render_sort_dashboard.py)
 ```
 
 ## Requirements
 
-- [Miniconda](https://docs.anaconda.com/miniconda/) or Anaconda (Python 3.11)
+- **Windows installer users:** no Python or conda needed — the installer bundles everything
+- **From source:** [Miniconda](https://docs.anaconda.com/miniconda/) or Anaconda (Python 3.11)
 - ~1 GB disk space for model weights (downloaded automatically on first run to `~/.cache/kagglehub/`)
 - GPU optional — runs fine on CPU at ~1–3 sec/image
 
