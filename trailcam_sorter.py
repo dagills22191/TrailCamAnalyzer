@@ -12,6 +12,7 @@ Usage
     python trailcam_sorter.py                        # GUI
     python trailcam_sorter.py "D:\\TrailCam\\June2026"
     python trailcam_sorter.py "D:\\TrailCam\\June2026" --country USA --dry-run
+    python trailcam_sorter.py "D:\\TrailCam\\June2026" --use-exif-timestamps
     python trailcam_sorter.py "D:\\TrailCam\\June2026" --confidence 0.5 --move
 """
 
@@ -21,6 +22,8 @@ import warnings
 warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
 
 import argparse
+import csv
+import hashlib
 import json
 import logging
 import queue
@@ -30,9 +33,10 @@ import sys
 import threading
 import time
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Literal, Optional
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -55,6 +59,18 @@ US_STATES = [
 ]
 VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv"}
 ALL_EXTS = IMAGE_EXTS | VIDEO_EXTS
+VIDEO_MATCH_MAX_GAP_SECONDS = 60
+VIDEO_MATCH_MODES = ("nearest", "minute")
+CLASSIFIER_BACKENDS = ("speciesnet",)
+EXIF_DATETIME_TAGS = ("DateTimeOriginal", "DateTimeDigitized", "DateTime")
+EVENT_KEY_SOURCE_FILENAME = "filename"
+EVENT_KEY_SOURCE_EXIF = "exif"
+EVENT_KEY_SOURCE_MTIME = "mtime"
+CONFIDENCE_PROFILES = {
+    "conservative": 0.60,
+    "balanced": 0.40,
+    "recall": 0.25,
+}
 
 # Matches: 20240615_083012.jpg, 20240615_083012_1.jpg, 20240615_083012_2.mp4
 EVENT_PATTERN = re.compile(
@@ -73,8 +89,7 @@ CONFIG_PATH = Path.home() / ".trailcam_sorter.json"
 def load_config() -> dict:
     try:
         return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    except Exception as e:
-        logging.debug("Could not load config from %s: %s", CONFIG_PATH, e)
+    except Exception:
         return {}
 
 
@@ -83,8 +98,30 @@ def save_config(data: dict):
         existing = load_config()
         existing.update(data)
         CONFIG_PATH.write_text(json.dumps(existing, indent=2), encoding="utf-8")
-    except Exception as e:
-        logging.debug("Could not save config to %s: %s", CONFIG_PATH, e)
+    except Exception:
+        pass
+
+def load_checkpoint(checkpoint_path: Path) -> set[str]:
+    """Load completed event keys from a checkpoint file."""
+    if not checkpoint_path.is_file():
+        return set()
+    try:
+        payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        keys = payload.get("completed_event_keys", []) if isinstance(payload, dict) else []
+        return {str(k) for k in keys}
+    except Exception:
+        return set()
+
+
+def save_checkpoint(checkpoint_path: Path, event_keys: set[str]):
+    """Persist completed event keys to a checkpoint file."""
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "updated": datetime.now().isoformat(),
+        "completed_event_keys": sorted(event_keys),
+        "count": len(event_keys),
+    }
+    checkpoint_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -102,47 +139,153 @@ def sanitize_label(label: str) -> str:
     return name.strip().title() if name else "Unknown"
 
 
-def _event_key_from_exif(path: Path) -> Optional[str]:
-    """Read DateTimeOriginal (or DateTime) from EXIF and return as YYYYMMDD_HHMMSS."""
+def read_exif_datetime(path: Path) -> Optional[datetime]:
+    """Read image capture time from EXIF metadata, if present."""
     try:
         from PIL import Image
-        img = Image.open(path)
-        exif = img.getexif()
-        dt_str = exif.get(36867) or exif.get(306)   # DateTimeOriginal, then DateTime
-        if dt_str:
-            dt = datetime.strptime(dt_str.strip(), "%Y:%m:%d %H:%M:%S")
-            return dt.strftime("%Y%m%d_%H%M%S")
+        from PIL.ExifTags import TAGS
+
+        with Image.open(path) as img:
+            exif = img.getexif()
+            if not exif:
+                return None
+
+            for tag_id, value in exif.items():
+                tag_name = TAGS.get(tag_id, str(tag_id))
+                if tag_name in EXIF_DATETIME_TAGS and isinstance(value, str):
+                    text = value.strip()
+                    try:
+                        return datetime.strptime(text, "%Y:%m:%d %H:%M:%S")
+                    except ValueError:
+                        continue
     except Exception:
-        pass
+        return None
     return None
 
 
-def _event_key_from_mtime(path: Path) -> str:
-    """Fall back to file modification time as YYYYMMDD_HHMMSS."""
-    dt = datetime.fromtimestamp(path.stat().st_mtime)
-    return dt.strftime("%Y%m%d_%H%M%S")
+def event_key_and_source_for_file(
+    path: Path,
+    use_exif_timestamps: bool = False,
+) -> tuple[Optional[str], Optional[str]]:
+    """Resolve a file to an event key and source type.
+
+    Returns (event_key, source) where source is one of: filename, exif, mtime.
+    """
+    m = EVENT_PATTERN.match(path.name)
+    if m and path.suffix.lower() in ALL_EXTS:
+        return m.group(1), EVENT_KEY_SOURCE_FILENAME
+
+    if use_exif_timestamps and path.suffix.lower() in ALL_EXTS:
+        ts = None
+        source = EVENT_KEY_SOURCE_MTIME
+        if path.suffix.lower() in IMAGE_EXTS:
+            ts = read_exif_datetime(path)
+            if ts is not None:
+                source = EVENT_KEY_SOURCE_EXIF
+
+        # If EXIF is missing/unreadable (or for videos), fall back to file modified time.
+        if ts is None:
+            try:
+                ts = datetime.fromtimestamp(path.stat().st_mtime)
+            except Exception:
+                ts = None
+
+        if ts:
+            return ts.strftime("%Y%m%d_%H%M%S"), source
+
+    return None, None
 
 
-def group_events(folder: Path, recursive: bool = True) -> dict[str, list[Path]]:
+def event_key_for_file(path: Path, use_exif_timestamps: bool = False) -> Optional[str]:
+    """Resolve a file to an event key (YYYYMMDD_HHMMSS)."""
+    event_key, _ = event_key_and_source_for_file(path, use_exif_timestamps=use_exif_timestamps)
+    return event_key
+
+
+def group_events(
+    folder: Path,
+    recursive: bool = True,
+    use_exif_timestamps: bool = False,
+    event_source_map: Optional[dict[str, set[str]]] = None,
+) -> dict[str, list[Path]]:
     """Group files by their base timestamp (the 'event key').
 
-    Priority: (1) filename pattern match, (2) EXIF DateTimeOriginal, (3) file mtime.
     Returns {event_key: [file1, file2, ...]} where event_key = "20240615_083012".
+    If use_exif_timestamps=True, non-matching files use EXIF capture time when
+    available (images), otherwise file modified time.
     """
     events: dict[str, list[Path]] = defaultdict(list)
     scan = folder.rglob("*") if recursive else folder.glob("*")
     for f in sorted(scan):
-        if not f.is_file() or f.suffix.lower() not in ALL_EXTS:
+        if not f.is_file():
             continue
-        m = EVENT_PATTERN.match(f.name)
-        if m:
-            event_key = m.group(1)
-        elif f.suffix.lower() in IMAGE_EXTS:
-            event_key = _event_key_from_exif(f) or _event_key_from_mtime(f)
-        else:
-            event_key = _event_key_from_mtime(f)
-        events[event_key].append(f)
+        event_key, source = event_key_and_source_for_file(f, use_exif_timestamps=use_exif_timestamps)
+        if event_key:
+            events[event_key].append(f)
+            if event_source_map is not None and source:
+                event_source_map.setdefault(event_key, set()).add(source)
     return dict(events)
+
+
+def merge_events_within_window(
+    events: dict[str, list[Path]],
+    event_source_map: Optional[dict[str, set[str]]] = None,
+    event_window_seconds: int = 0,
+) -> tuple[dict[str, list[Path]], Optional[dict[str, set[str]]]]:
+    """Merge adjacent events when timestamp gaps are within a configured window.
+
+    The merged event key remains the earliest key in the cluster.
+    """
+    if event_window_seconds <= 0 or len(events) <= 1:
+        return events, event_source_map
+
+    keyed: list[tuple[str, datetime]] = []
+    passthrough: dict[str, list[Path]] = {}
+    for key, files in events.items():
+        ts = parse_event_key_timestamp(key)
+        if ts is None:
+            passthrough[key] = files
+        else:
+            keyed.append((key, ts))
+
+    if not keyed:
+        return events, event_source_map
+
+    keyed.sort(key=lambda item: item[1])
+    merged_events: dict[str, list[Path]] = {}
+    merged_sources: Optional[dict[str, set[str]]] = {} if event_source_map is not None else None
+
+    current_key, last_ts = keyed[0]
+    current_files = list(events[current_key])
+    current_sources = set(event_source_map.get(current_key, set())) if event_source_map is not None else set()
+
+    for key, ts in keyed[1:]:
+        gap = (ts - last_ts).total_seconds()
+        if gap <= event_window_seconds:
+            current_files.extend(events[key])
+            if event_source_map is not None:
+                current_sources.update(event_source_map.get(key, set()))
+            last_ts = ts
+            continue
+
+        merged_events[current_key] = current_files
+        if merged_sources is not None:
+            merged_sources[current_key] = set(current_sources)
+
+        current_key, last_ts = key, ts
+        current_files = list(events[key])
+        current_sources = set(event_source_map.get(key, set())) if event_source_map is not None else set()
+
+    merged_events[current_key] = current_files
+    if merged_sources is not None:
+        merged_sources[current_key] = set(current_sources)
+
+    for key, files in passthrough.items():
+        merged_events[key] = files
+        if merged_sources is not None and event_source_map is not None:
+            merged_sources[key] = set(event_source_map.get(key, set()))
+
+    return merged_events, merged_sources
 
 
 def pick_representative(files: list[Path], use_sharpness: bool = False) -> Optional[Path]:
@@ -182,6 +325,33 @@ def score_sharpness(path: Path) -> float:
         return float(cv2.Laplacian(img, cv2.CV_64F).var())
     except Exception:
         return 0.0
+
+
+def is_cv2_available() -> bool:
+    """Return True when OpenCV is importable in this environment."""
+    try:
+        import cv2  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def parse_event_key_timestamp(event_key: str) -> Optional[datetime]:
+    """Parse event key like 20240615_083012 into a datetime."""
+    try:
+        return datetime.strptime(event_key, "%Y%m%d_%H%M%S")
+    except ValueError:
+        return None
+
+
+def resolve_confidence_threshold(
+    confidence: Optional[float],
+    profile: str = "balanced",
+) -> float:
+    """Resolve confidence threshold from explicit value or named profile."""
+    if confidence is not None:
+        return confidence
+    return CONFIDENCE_PROFILES.get(profile, CONFIDENCE_PROFILES["balanced"])
 
 
 # ---------------------------------------------------------------------------
@@ -229,12 +399,69 @@ def classify_images(
     return lookup
 
 
+def load_classifier_backend(backend: str, log: logging.Logger):
+    """Load the configured classifier backend."""
+    if backend == "speciesnet":
+        return load_model(log)
+    raise ValueError(f"Unsupported classifier backend: {backend}")
+
+
+def classify_with_backend(
+    backend: str,
+    model,
+    image_paths: list[Path],
+    country: Optional[str],
+    region: Optional[str],
+    log: logging.Logger,
+) -> dict[str, dict]:
+    """Dispatch classification to the configured backend implementation."""
+    if backend == "speciesnet":
+        return classify_images(model, image_paths, country, region, log)
+    raise ValueError(f"Unsupported classifier backend: {backend}")
+
+
 # ---------------------------------------------------------------------------
 # File mover / copier
 # ---------------------------------------------------------------------------
 
 class Cancelled(Exception):
     pass
+
+
+@dataclass
+class RunResult:
+    source: Path
+    output: Path
+    dry_run: bool
+    total_files_scanned: int
+    total_events: int
+    classified_image_events: int
+    video_only_events: int
+    total_files_sorted: int
+    species_counts: dict[str, int]
+    review_files: int
+    phase_timings: dict[str, float]
+    video_matching: dict[str, int]
+    event_key_sources: dict[str, int]
+    exact_duplicates_skipped: int = 0
+    report_path: Optional[Path] = None
+    csv_report_path: Optional[Path] = None
+    checkpoint_path: Optional[Path] = None
+
+
+def compute_file_sha256(path: Path, chunk_size: int = 1024 * 1024) -> Optional[str]:
+    """Compute SHA256 for exact duplicate detection; returns None on read failure."""
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        return digest.hexdigest()
+    except Exception:
+        return None
 
 
 def sort_files(
@@ -248,29 +475,46 @@ def sort_files(
     log: logging.Logger,
     subfolders: bool = True,
     sharpness: bool = False,
+    dedupe_exact: bool = False,
+    video_match_mode: Literal["nearest", "minute"] = "nearest",
     progress_callback: Optional[Callable[[float], None]] = None,
     cancel_event: Optional[threading.Event] = None,
+    video_match_stats: Optional[dict[str, int]] = None,
+    dedupe_stats: Optional[dict[str, int]] = None,
 ) -> dict[str, int]:
     """Copy/move files into species subfolders, renamed to yyyy-mm-dd_HH-MM-SS_species.ext.
 
     Blank predictions are skipped. Low-confidence/unknown go to Review/.
-    Video-only events are matched to classified image events by minute.
+    Video-only events are matched by the selected strategy:
+    - nearest: nearest confidently classified image event within VIDEO_MATCH_MAX_GAP_SECONDS
+    - minute: legacy minute-bucket matching
     Returns counter {species_folder: count}.
     """
     stats: dict[str, int] = defaultdict(int)
+    local_video_match_stats: dict[str, int] = {
+        "video_only_events": 0,
+        "video_matched_nearest": 0,
+        "video_matched_minute": 0,
+        "video_unmatched": 0,
+    }
     action = shutil.move if move else shutil.copy2
     verb = "MOVE" if move else "COPY"
-    reserved: set[str] = set()  # tracks claimed destination paths within this run
+    reserved_destinations: set[str] = set()
+    seen_hashes: set[str] = set()
+    duplicates_skipped = 0
 
-    # Build minute-level species lookup (YYYYMMDD_HHMM -> species)
+    # Build candidates for video-only matching from confidently classified image events.
     minute_species: dict[str, str] = {}
+    video_match_candidates: list[tuple[datetime, str, float]] = []
     for ek in rep_map:
         pred = predictions.get(str(rep_map[ek]), {})
         lbl = pred.get("prediction", "")
         sc = pred.get("prediction_score", 0.0) or 0.0
         sp = sanitize_label(lbl) if lbl else ""
-        if sp and sp.lower() != "blank" and sc >= min_confidence and "unknown" not in lbl.lower():
+        ts = parse_event_key_timestamp(ek)
+        if ts and sp and sp.lower() != "blank" and sc >= min_confidence and "unknown" not in lbl.lower():
             minute_species[ek[:13]] = sp
+            video_match_candidates.append((ts, sp, float(sc)))
 
     total_events = len(events)
     for i, (event_key, files) in enumerate(events.items()):
@@ -281,11 +525,47 @@ def sort_files(
 
         rep = rep_map.get(event_key)
         if rep is None:
-            species_name = minute_species.get(event_key[:13])
+            local_video_match_stats["video_only_events"] += 1
+            species_name = None
+            if video_match_mode == "minute":
+                species_name = minute_species.get(event_key[:13])
+                if species_name:
+                    local_video_match_stats["video_matched_minute"] += 1
+                    log.debug(
+                        "Event %s: video matched to '%s' by legacy minute bucket",
+                        event_key,
+                        species_name,
+                    )
+            else:
+                event_ts = parse_event_key_timestamp(event_key)
+                if event_ts and video_match_candidates:
+                    ranked = sorted(
+                        video_match_candidates,
+                        key=lambda c: (abs((c[0] - event_ts).total_seconds()), -c[2]),
+                    )
+                    best_ts, best_species, _ = ranked[0]
+                    gap_s = abs((best_ts - event_ts).total_seconds())
+                    if gap_s <= VIDEO_MATCH_MAX_GAP_SECONDS:
+                        species_name = best_species
+                        local_video_match_stats["video_matched_nearest"] += 1
+                        log.debug(
+                            "Event %s: video matched to '%s' by nearest image event (%.0f sec gap)",
+                            event_key,
+                            species_name,
+                            gap_s,
+                        )
+
             if not species_name:
-                log.debug("Event %s: video-only, no image match within same minute, skipping", event_key)
+                local_video_match_stats["video_unmatched"] += 1
+                if video_match_mode == "minute":
+                    log.debug("Event %s: video-only, no image match within same minute, skipping", event_key)
+                else:
+                    log.debug(
+                        "Event %s: video-only, no image match within %d seconds, skipping",
+                        event_key,
+                        VIDEO_MATCH_MAX_GAP_SECONDS,
+                    )
                 continue
-            log.debug("Event %s: video matched to '%s' by minute", event_key, species_name)
         else:
             pred = predictions.get(str(rep), {})
             label = pred.get("prediction", "")
@@ -314,13 +594,23 @@ def sort_files(
         )
 
         for f in files_to_copy:
+            if dedupe_exact:
+                digest = compute_file_sha256(f)
+                if digest:
+                    if digest in seen_hashes:
+                        duplicates_skipped += 1
+                        log.debug("Skipping exact duplicate: %s", f.name)
+                        continue
+                    seen_hashes.add(digest)
+
             ext = f.suffix.lower()
-            dst = target_dir / f"{date_str}_{time_str}_{species_name}{ext}"
+            stem = f"{date_str}_{time_str}_{species_name}"
+            dst = target_dir / f"{stem}{ext}"
             i2 = 2
-            while dst.exists() or str(dst) in reserved:
-                dst = target_dir / f"{date_str}_{time_str}_{species_name}_{i2}{ext}"
+            while dst.exists() or str(dst) in reserved_destinations:
+                dst = target_dir / f"{stem}_{i2}{ext}"
                 i2 += 1
-            reserved.add(str(dst))
+            reserved_destinations.add(str(dst))
 
             if dry_run:
                 log.debug("[DRY RUN] %s  %s  ->  %s/%s", verb, f.name, species_name, dst.name)
@@ -330,6 +620,13 @@ def sort_files(
                 log.debug("%s  %s  ->  %s/%s", verb, f.name, species_name, dst.name)
 
             stats[species_name] += 1
+
+    if video_match_stats is not None:
+        video_match_stats.clear()
+        video_match_stats.update(local_video_match_stats)
+    if dedupe_stats is not None:
+        dedupe_stats.clear()
+        dedupe_stats.update({"exact_duplicates_skipped": duplicates_skipped})
 
     return dict(stats)
 
@@ -345,11 +642,43 @@ def write_report(
     rep_map: dict[str, Path],
     stats: dict[str, int],
     log: logging.Logger,
+    phase_timings: Optional[dict[str, float]] = None,
+    video_match_stats: Optional[dict[str, int]] = None,
+    grouping_source_stats: Optional[dict[str, int]] = None,
+    dedupe_stats: Optional[dict[str, int]] = None,
 ):
+    video_only_events = (
+        video_match_stats.get("video_only_events", 0)
+        if video_match_stats
+        else max(len(events) - len(rep_map), 0)
+    )
+    exif_events = grouping_source_stats.get("exif_derived_events", 0) if grouping_source_stats else 0
+    mtime_events = grouping_source_stats.get("mtime_derived_events", 0) if grouping_source_stats else 0
+
     report = {
         "generated": datetime.now().isoformat(),
         "total_events": len(events),
         "total_files_sorted": sum(stats.values()),
+        "summary": {
+            "classified_image_events": len(rep_map),
+            "video_only_events": video_only_events,
+            "exif_derived_events": exif_events,
+            "mtime_derived_events": mtime_events,
+            "exact_duplicates_skipped": dedupe_stats.get("exact_duplicates_skipped", 0) if dedupe_stats else 0,
+        },
+        "timings_seconds": phase_timings or {},
+        "video_matching": video_match_stats or {
+            "video_only_events": video_only_events,
+            "video_matched_nearest": 0,
+            "video_matched_minute": 0,
+            "video_unmatched": 0,
+        },
+        "event_key_sources": grouping_source_stats or {
+            "filename_events": len(events),
+            "exif_derived_events": 0,
+            "mtime_derived_events": 0,
+        },
+        "duplicate_handling": dedupe_stats or {"exact_duplicates_skipped": 0},
         "species_counts": dict(sorted(stats.items(), key=lambda x: -x[1])),
         "event_details": [],
     }
@@ -366,6 +695,29 @@ def write_report(
     report_path = dest_root / "_sort_report.json"
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     log.info("Report saved to %s", report_path)
+    return report_path
+
+
+def write_species_csv(
+    dest_root: Path,
+    stats: dict[str, int],
+    log: logging.Logger,
+    csv_path: Optional[Path] = None,
+) -> Path:
+    """Write species/category counts to CSV for spreadsheet analysis."""
+    output_path = csv_path if csv_path is not None else (dest_root / "_sort_report.csv")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    total = sum(stats.values())
+    with output_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["category", "count", "percent_of_sorted"])
+        for category, count in sorted(stats.items(), key=lambda x: -x[1]):
+            pct = (count / total * 100.0) if total else 0.0
+            writer.writerow([category, count, f"{pct:.2f}"])
+
+    log.info("CSV report saved to %s", output_path)
+    return output_path
 
 
 # ---------------------------------------------------------------------------
@@ -384,11 +736,19 @@ def run_sort(
     log: logging.Logger,
     subfolders: bool = True,
     sharpness: bool = False,
+    classifier_backend: str = "speciesnet",
+    dedupe_exact: bool = False,
+    video_match_mode: Literal["nearest", "minute"] = "nearest",
+    use_exif_timestamps: bool = True,
     recursive: bool = True,
+    event_window_seconds: int = 0,
+    report_csv: Optional[Path] = None,
+    checkpoint_path: Optional[Path] = None,
+    resume_from_checkpoint: bool = False,
     progress_callback: Optional[Callable[[float], None]] = None,
     status_callback: Optional[Callable[[str], None]] = None,
     cancel_event: Optional[threading.Event] = None,
-):
+)-> RunResult:
     """Run the full sort pipeline. Raises Cancelled if cancel_event is set."""
     def check():
         if cancel_event and cancel_event.is_set():
@@ -401,32 +761,116 @@ def run_sort(
     if progress_callback:
         progress_callback(0.0)
 
+    run_start = time.perf_counter()
+    phase_timings: dict[str, float] = {}
+
     log.info("Source : %s", source)
     log.info("Output : %s", dest_root)
     log.info("Mode   : %s", "MOVE" if move else "COPY")
+    log.info("Classifier backend: %s", classifier_backend)
+    log.info("Exact dedupe: %s", "enabled" if dedupe_exact else "disabled")
+    log.info("Video match mode: %s", video_match_mode)
+    if use_exif_timestamps:
+        log.info("EXIF fallback: enabled (for images without timestamp-style filenames)")
+    else:
+        log.warning(
+            "EXIF fallback: disabled (strict timestamp-style filenames only). "
+            "Non-matching files may be skipped."
+        )
     if dry_run:
         log.info("*** DRY RUN -- no files will be touched ***")
-
-    if sharpness:
-        try:
-            import cv2  # noqa: F401
-        except ImportError:
-            log.warning(
-                "--sharpest requested but opencv-python is not installed; "
-                "all frames will score 0.0 and the first image in each burst will be used. "
-                "Fix with: pip install opencv-python"
-            )
+    if checkpoint_path:
+        log.info("Checkpoint file: %s", checkpoint_path)
+        if resume_from_checkpoint:
+            log.info("Resume mode: enabled")
 
     # 1. Group files by event
     check()
     status("Scanning files…")
-    events = group_events(source, recursive=recursive)
+    group_start = time.perf_counter()
+    event_source_map: dict[str, set[str]] = {}
+    events = group_events(
+        source,
+        recursive=recursive,
+        use_exif_timestamps=use_exif_timestamps,
+        event_source_map=event_source_map,
+    )
+    events, merged_sources = merge_events_within_window(
+        events,
+        event_source_map=event_source_map,
+        event_window_seconds=event_window_seconds,
+    )
+    if merged_sources is not None:
+        event_source_map = merged_sources
+
+    completed_before: set[str] = set()
+    if checkpoint_path and resume_from_checkpoint:
+        completed_before = load_checkpoint(checkpoint_path)
+        if completed_before:
+            events = {k: v for k, v in events.items() if k not in completed_before}
+            event_source_map = {k: v for k, v in event_source_map.items() if k in events}
+            log.info("Resume filter: skipped %d previously completed events", len(completed_before))
+
+    phase_timings["group_events"] = time.perf_counter() - group_start
+    total_files = sum(len(v) for v in events.values())
     if not events:
         log.warning("No matching files found in %s", source)
-        return
+        return RunResult(
+            source=source,
+            output=dest_root,
+            dry_run=dry_run,
+            total_files_scanned=0,
+            total_events=0,
+            classified_image_events=0,
+            video_only_events=0,
+            total_files_sorted=0,
+            species_counts={},
+            review_files=0,
+            phase_timings=phase_timings,
+            video_matching={
+                "video_only_events": 0,
+                "video_matched_nearest": 0,
+                "video_matched_minute": 0,
+                "video_unmatched": 0,
+            },
+            event_key_sources={
+                "filename_events": 0,
+                "exif_derived_events": 0,
+                "mtime_derived_events": 0,
+            },
+            checkpoint_path=checkpoint_path,
+        )
 
-    total_files = sum(len(v) for v in events.values())
+    filename_events = sum(
+        1 for srcs in event_source_map.values() if EVENT_KEY_SOURCE_FILENAME in srcs
+    )
+    exif_derived_events = sum(
+        1
+        for srcs in event_source_map.values()
+        if EVENT_KEY_SOURCE_FILENAME not in srcs and EVENT_KEY_SOURCE_EXIF in srcs
+    )
+    mtime_derived_events = sum(
+        1
+        for srcs in event_source_map.values()
+        if EVENT_KEY_SOURCE_FILENAME not in srcs and EVENT_KEY_SOURCE_EXIF not in srcs and EVENT_KEY_SOURCE_MTIME in srcs
+    )
+    grouping_source_stats = {
+        "filename_events": filename_events,
+        "exif_derived_events": exif_derived_events,
+        "mtime_derived_events": mtime_derived_events,
+    }
+
     log.info("Found %d events encompassing %d files", len(events), total_files)
+    if event_window_seconds > 0:
+        log.info("Event merge window: %d second(s)", event_window_seconds)
+    if exif_derived_events or mtime_derived_events:
+        log.info(
+            "Event key sources: filename=%d, exif-derived=%d, mtime-derived=%d",
+            filename_events,
+            exif_derived_events,
+            mtime_derived_events,
+            checkpoint_path=checkpoint_path,
+        )
     if progress_callback:
         progress_callback(0.05)
 
@@ -446,19 +890,53 @@ def run_sort(
 
     if not images_to_classify:
         log.warning("No images to classify -- nothing to do.")
-        return
+        return RunResult(
+            source=source,
+            output=dest_root,
+            dry_run=dry_run,
+            total_files_scanned=total_files,
+            total_events=len(events),
+            classified_image_events=0,
+            video_only_events=len(events),
+            total_files_sorted=0,
+            species_counts={},
+            review_files=0,
+            phase_timings=phase_timings,
+            video_matching={
+                "video_only_events": len(events),
+                "video_matched_nearest": 0,
+                "video_matched_minute": 0,
+                "video_unmatched": len(events),
+            },
+            event_key_sources=grouping_source_stats,
+        )
+
+    if sharpness and not is_cv2_available():
+        log.warning("--sharpest enabled but OpenCV (cv2) is not available; "
+                    "falling back to default representative selection.")
 
     if progress_callback:
         progress_callback(0.10)
 
     # 3. Load model & run inference (cannot be interrupted mid-inference)
     status("Loading model…")
-    model = load_model(log)
+    load_start = time.perf_counter()
+    model = load_classifier_backend(classifier_backend, log)
+    phase_timings["load_model"] = time.perf_counter() - load_start
     if progress_callback:
         progress_callback(0.20)
 
     status(f"Running inference on {len(images_to_classify)} images…")
-    predictions = classify_images(model, images_to_classify, country, region, log)
+    inference_start = time.perf_counter()
+    predictions = classify_with_backend(
+        classifier_backend,
+        model,
+        images_to_classify,
+        country,
+        region,
+        log,
+    )
+    phase_timings["inference"] = time.perf_counter() - inference_start
     if progress_callback:
         progress_callback(0.85)
 
@@ -474,18 +952,61 @@ def run_sort(
 
     # 4. Sort files
     status("Copying files…" if not dry_run else "Previewing (dry run)…")
+    sort_start = time.perf_counter()
+    video_match_stats: dict[str, int] = {}
+    dedupe_stats: dict[str, int] = {}
     stats = sort_files(
         events, predictions, rep_map,
         dest_root, confidence, move, dry_run, log,
         subfolders=subfolders,
         sharpness=sharpness,
+        dedupe_exact=dedupe_exact,
+        video_match_mode=video_match_mode,
         progress_callback=progress_callback,
         cancel_event=cancel_event,
+        video_match_stats=video_match_stats,
+        dedupe_stats=dedupe_stats,
     )
+    phase_timings["sort_files"] = time.perf_counter() - sort_start
+    phase_timings["total_pipeline"] = time.perf_counter() - run_start
+    log.info(
+        "Video matching: video-only=%d, matched-nearest=%d, matched-minute=%d, unmatched=%d",
+        video_match_stats.get("video_only_events", 0),
+        video_match_stats.get("video_matched_nearest", 0),
+        video_match_stats.get("video_matched_minute", 0),
+        video_match_stats.get("video_unmatched", 0),
+    )
+
+    report_path: Optional[Path] = None
+    csv_report_path: Optional[Path] = None
 
     # 5. Write report
     if not dry_run:
-        write_report(dest_root, events, predictions, rep_map, stats, log)
+        report_path = write_report(
+            dest_root,
+            events,
+            predictions,
+            rep_map,
+            stats,
+            log,
+            phase_timings=phase_timings,
+            video_match_stats=video_match_stats,
+            grouping_source_stats=grouping_source_stats,
+            dedupe_stats=dedupe_stats,
+        )
+        if report_csv is not None:
+            csv_report_path = write_species_csv(
+                dest_root=dest_root,
+                stats=stats,
+                log=log,
+                csv_path=report_csv,
+            )
+        if checkpoint_path:
+            completed_now = set(events.keys())
+            save_checkpoint(checkpoint_path, completed_before.union(completed_now))
+            log.info("Checkpoint updated with %d completed events", len(completed_before.union(completed_now)))
+    elif checkpoint_path:
+        log.info("Checkpoint not updated during dry run")
 
     # Summary
     total_sorted = sum(stats.values())
@@ -497,11 +1018,52 @@ def run_sort(
         log.info("%-36s  %5d", species, count)
     log.info("%-36s  %5d", "TOTAL", total_sorted)
     log.info("")
+    log.info(
+        "RUN SUMMARY | files=%d events=%d reps=%d video_only=%d sorted=%d review=%d exif_events=%d mtime_events=%d unmatched_video_only=%d",
+        total_files,
+        len(events),
+        len(rep_map),
+        max(len(events) - len(rep_map), 0),
+        total_sorted,
+        stats.get("Review", 0),
+        grouping_source_stats.get("exif_derived_events", 0),
+        grouping_source_stats.get("mtime_derived_events", 0),
+        video_match_stats.get("video_unmatched", 0),
+    )
+    log.info("Duplicates skipped (exact hash): %d", dedupe_stats.get("exact_duplicates_skipped", 0))
+    log.info(
+        "TIMINGS (s) | group=%.2f load=%.2f inference=%.2f sort=%.2f total=%.2f",
+        phase_timings.get("group_events", 0.0),
+        phase_timings.get("load_model", 0.0),
+        phase_timings.get("inference", 0.0),
+        phase_timings.get("sort_files", 0.0),
+        phase_timings.get("total_pipeline", 0.0),
+    )
     log.info("Output: %s", dest_root)
 
     status(f"Complete — {total_sorted} file{'s' if total_sorted != 1 else ''} sorted")
     if progress_callback:
         progress_callback(1.0)
+
+    return RunResult(
+        source=source,
+        output=dest_root,
+        dry_run=dry_run,
+        total_files_scanned=total_files,
+        total_events=len(events),
+        classified_image_events=len(rep_map),
+        video_only_events=max(len(events) - len(rep_map), 0),
+        total_files_sorted=total_sorted,
+        species_counts=dict(sorted(stats.items(), key=lambda x: -x[1])),
+        review_files=stats.get("Review", 0),
+        phase_timings=phase_timings,
+        video_matching=video_match_stats,
+        event_key_sources=grouping_source_stats,
+        exact_duplicates_skipped=dedupe_stats.get("exact_duplicates_skipped", 0),
+        report_path=report_path,
+        csv_report_path=csv_report_path,
+        checkpoint_path=checkpoint_path,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -637,79 +1199,152 @@ class TrailCamGUI:
         opts = ctk.CTkFrame(self.root, fg_color=CARD, corner_radius=8)
         opts.pack(fill="x", padx=16, pady=(6, 0))
 
-        geo_row = ctk.CTkFrame(opts, fg_color="transparent")
-        geo_row.pack(fill="x", padx=16, pady=(14, 4))
+        mode_row = ctk.CTkFrame(opts, fg_color="transparent")
+        mode_row.pack(fill="x", padx=16, pady=(12, 4))
 
-        ctk.CTkLabel(geo_row, text="Country",
-                     font=ctk.CTkFont(size=11), text_color=DIM).pack(side="left", padx=(0, 6))
-        self.country_var = ctk.StringVar(value="")
-        self.country_combo = ctk.CTkComboBox(
-            geo_row, variable=self.country_var, width=96, values=COUNTRY_CODES,
-            fg_color=INNER, border_color=SEP, button_color=SEP, button_hover_color=CLOSE_H,
-            dropdown_fg_color=INNER, dropdown_hover_color=CLOSE_H, dropdown_text_color=TEXT,
-            command=self._on_country_change,
-        )
-        self.country_combo.pack(side="left", padx=(0, 20))
-
-        ctk.CTkLabel(geo_row, text="Region (US)",
-                     font=ctk.CTkFont(size=11), text_color=DIM).pack(side="left", padx=(0, 6))
-        self.region_var = ctk.StringVar(value="")
-        self.region_combo = ctk.CTkComboBox(
-            geo_row, variable=self.region_var, width=86, values=US_STATES, state="disabled",
-            fg_color=INNER, border_color=SEP, button_color=SEP, button_hover_color=CLOSE_H,
-            dropdown_fg_color=INNER, dropdown_hover_color=CLOSE_H, dropdown_text_color=TEXT,
-        )
-        self.region_combo.pack(side="left", padx=(0, 28))
-
-        ctk.CTkLabel(geo_row, text="Confidence",
-                     font=ctk.CTkFont(size=11), text_color=DIM).pack(side="left", padx=(0, 8))
-        self.conf_var = ctk.DoubleVar(value=0.4)
-        ctk.CTkSlider(
-            geo_row, from_=0.1, to=0.9, number_of_steps=16,
-            variable=self.conf_var, width=140,
-            button_color=GREEN, button_hover_color=GREEN_H, progress_color=GREEN,
-            fg_color=INNER,
-            command=lambda v: self.conf_label.configure(text=f"{float(v):.2f}"),
+        self.advanced_mode_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            mode_row,
+            text="Advanced mode",
+            variable=self.advanced_mode_var,
+            fg_color=GREEN,
+            hover_color=GREEN_H,
+            checkmark_color="white",
+            command=self._on_advanced_mode_toggle,
         ).pack(side="left")
-        self.conf_label = ctk.CTkLabel(
-            geo_row, text="0.40", width=40,
-            font=ctk.CTkFont(size=12, weight="bold"), text_color=TEXT,
+
+        self.mode_hint_label = ctk.CTkLabel(
+            mode_row,
+            text="Basic mode shows common options. Enable advanced mode for expert controls.",
+            font=ctk.CTkFont(size=10),
+            text_color=MUTED,
+            anchor="w",
         )
-        self.conf_label.pack(side="left", padx=(6, 0))
+        self.mode_hint_label.pack(side="left", padx=(12, 0))
 
-        ctk.CTkLabel(
-            opts,
-            text="Geofencing optional · Region for USA only  ·  "
-                 "Confidence: 0.4 default, lower = more results, higher = more certain",
-            font=ctk.CTkFont(size=10), text_color=MUTED, anchor="w",
-        ).pack(fill="x", padx=16, pady=(0, 8))
-
-        ctk.CTkFrame(opts, height=1, fg_color=SEP).pack(fill="x", padx=12, pady=(0, 10))
-
-        chk_row = ctk.CTkFrame(opts, fg_color="transparent")
-        chk_row.pack(fill="x", padx=16, pady=(0, 14))
+        basic_row = ctk.CTkFrame(opts, fg_color="transparent")
+        basic_row.pack(fill="x", padx=16, pady=(6, 8))
 
         self.recursive_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(
-            chk_row, text="Scan subfolders", variable=self.recursive_var,
+            basic_row, text="Scan subfolders", variable=self.recursive_var,
             fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
         ).pack(side="left", padx=(0, 22))
 
         self.move_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(
-            chk_row, text="Move files", variable=self.move_var,
-            fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
-        ).pack(side="left", padx=(0, 22))
-
-        self.subfolders_var = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(
-            chk_row, text="Species subfolders", variable=self.subfolders_var,
+            basic_row, text="Move files", variable=self.move_var,
             fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
         ).pack(side="left", padx=(0, 22))
 
         self.dry_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(
-            chk_row, text="Dry run", variable=self.dry_var,
+            basic_row, text="Dry run", variable=self.dry_var,
+            fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
+        ).pack(side="left", padx=(0, 22))
+
+        basic_geo_row = ctk.CTkFrame(opts, fg_color="transparent")
+        basic_geo_row.pack(fill="x", padx=16, pady=(0, 6))
+
+        ctk.CTkLabel(
+            basic_geo_row,
+            text="Country",
+            font=ctk.CTkFont(size=11),
+            text_color=DIM,
+        ).pack(side="left", padx=(0, 6))
+        self.country_var = ctk.StringVar(value="")
+        self.country_combo = ctk.CTkComboBox(
+            basic_geo_row,
+            variable=self.country_var,
+            width=96,
+            values=COUNTRY_CODES,
+            fg_color=INNER,
+            border_color=SEP,
+            button_color=SEP,
+            button_hover_color=CLOSE_H,
+            dropdown_fg_color=INNER,
+            dropdown_hover_color=CLOSE_H,
+            dropdown_text_color=TEXT,
+            command=self._on_country_change,
+        )
+        self.country_combo.pack(side="left", padx=(0, 20))
+
+        ctk.CTkLabel(
+            basic_geo_row,
+            text="Region (US)",
+            font=ctk.CTkFont(size=11),
+            text_color=DIM,
+        ).pack(side="left", padx=(0, 6))
+        self.region_var = ctk.StringVar(value="")
+        self.region_combo = ctk.CTkComboBox(
+            basic_geo_row,
+            variable=self.region_var,
+            width=86,
+            values=US_STATES,
+            state="disabled",
+            fg_color=INNER,
+            border_color=SEP,
+            button_color=SEP,
+            button_hover_color=CLOSE_H,
+            dropdown_fg_color=INNER,
+            dropdown_hover_color=CLOSE_H,
+            dropdown_text_color=TEXT,
+        )
+        self.region_combo.pack(side="left", padx=(0, 28))
+
+        ctk.CTkLabel(
+            basic_geo_row,
+            text="Confidence",
+            font=ctk.CTkFont(size=11),
+            text_color=DIM,
+        ).pack(side="left", padx=(0, 8))
+        self.conf_var = ctk.DoubleVar(value=0.4)
+        ctk.CTkSlider(
+            basic_geo_row,
+            from_=0.1,
+            to=0.9,
+            number_of_steps=16,
+            variable=self.conf_var,
+            width=140,
+            button_color=GREEN,
+            button_hover_color=GREEN_H,
+            progress_color=GREEN,
+            fg_color=INNER,
+            command=lambda v: self.conf_label.configure(text=f"{float(v):.2f}"),
+        ).pack(side="left")
+        self.conf_label = ctk.CTkLabel(
+            basic_geo_row,
+            text="0.40",
+            width=40,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=TEXT,
+        )
+        self.conf_label.pack(side="left", padx=(6, 18))
+
+        ctk.CTkLabel(
+            basic_geo_row,
+            text="Geofencing optional · Region applies to USA only · lower confidence = more results",
+            font=ctk.CTkFont(size=10),
+            text_color=MUTED,
+        ).pack(side="left")
+
+        self.advanced_frame = ctk.CTkFrame(opts, fg_color="transparent")
+        self.advanced_frame.pack(fill="x", padx=0, pady=(0, 10))
+
+        ctk.CTkLabel(
+            self.advanced_frame,
+            text="Advanced options for output layout and event handling.",
+            font=ctk.CTkFont(size=10), text_color=MUTED, anchor="w",
+        ).pack(fill="x", padx=16, pady=(2, 8))
+
+        ctk.CTkFrame(self.advanced_frame, height=1, fg_color=SEP).pack(fill="x", padx=12, pady=(0, 10))
+
+        chk_row = ctk.CTkFrame(self.advanced_frame, fg_color="transparent")
+        chk_row.pack(fill="x", padx=16, pady=(0, 14))
+
+        self.subfolders_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            chk_row, text="Species subfolders", variable=self.subfolders_var,
             fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
         ).pack(side="left", padx=(0, 22))
 
@@ -718,6 +1353,14 @@ class TrailCamGUI:
             chk_row, text="Pick sharpest frame", variable=self.sharpness_var,
             fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
         ).pack(side="left")
+
+        self.exif_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            chk_row, text="Use EXIF/modified-time fallback (recommended)", variable=self.exif_var,
+            fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
+        ).pack(side="left", padx=(22, 0))
+
+        self._set_advanced_mode(False)
 
         # ── Run controls ─────────────────────────────────────────────────
         section_header("RUN")
@@ -796,11 +1439,26 @@ class TrailCamGUI:
             self.region_var.set("")
             self.region_combo.configure(state="disabled")
 
+    def _set_advanced_mode(self, enabled: bool):
+        if enabled:
+            self.advanced_frame.pack(fill="x", padx=0, pady=(0, 10))
+            self.mode_hint_label.configure(
+                text="Advanced mode enabled: expert controls are visible."
+            )
+        else:
+            self.advanced_frame.pack_forget()
+            self.mode_hint_label.configure(
+                text="Basic mode shows common options, including geofencing and confidence. Enable advanced mode for expert controls."
+            )
+
+    def _on_advanced_mode_toggle(self):
+        self._set_advanced_mode(self.advanced_mode_var.get())
+
     def _browse(self, var, title: str):
         from tkinter import filedialog
         folder = filedialog.askdirectory(title=title, parent=self.root)
         if folder:
-            var.set(str(Path(folder)))
+            var.set(folder)
 
     def _set_progress(self, value: float):
         self._busy = False
@@ -847,10 +1505,6 @@ class TrailCamGUI:
         self._cancel_event.set()
         self.cancel_btn.configure(state="disabled", text="Cancelling…")
         self._append_log("Cancelling — will stop after current operation...")
-        if self._busy:
-            self.status_label.configure(
-                text="Waiting for inference to finish before cancelling…"
-            )
 
     def _on_run(self):
         if self._running:
@@ -901,7 +1555,12 @@ class TrailCamGUI:
                     log=log,
                     subfolders=self.subfolders_var.get(),
                     sharpness=self.sharpness_var.get(),
+                    classifier_backend="speciesnet",
+                    dedupe_exact=False,
                     recursive=self.recursive_var.get(),
+                    use_exif_timestamps=self.exif_var.get(),
+                    event_window_seconds=0,
+                    report_csv=None,
                     progress_callback=lambda v: self._q.put(("progress", v)),
                     status_callback=lambda s: self._q.put(("status", s)),
                     cancel_event=self._cancel_event,
@@ -939,8 +1598,14 @@ def main():
     parser.add_argument("source", help="Folder containing trail-cam images/videos.")
     parser.add_argument("-o", "--output", default=str(Path.home() / "TrailCamAnimals"),
                         help="Destination root.  Default: ~/TrailCamAnimals")
-    parser.add_argument("-c", "--confidence", type=float, default=0.4,
-                        help="Minimum confidence threshold (0-1).  Default: 0.4")
+    parser.add_argument("-c", "--confidence", type=float, default=None,
+                        help="Minimum confidence threshold (0-1). Overrides --confidence-profile.")
+    parser.add_argument(
+        "--confidence-profile",
+        choices=tuple(CONFIDENCE_PROFILES.keys()),
+        default="balanced",
+        help="Confidence preset: conservative=0.60, balanced=0.40 (default), recall=0.25",
+    )
     parser.add_argument("--country", default=None,
                         help="ISO 3166-1 alpha-3 country code (e.g. USA)")
     parser.add_argument("--region", default=None,
@@ -956,12 +1621,52 @@ def main():
                              "Videos are always included. Default: off.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Preview without touching files.")
+    parser.add_argument("--video-match-mode", choices=VIDEO_MATCH_MODES, default="nearest",
+                        help="Video-only matching strategy: nearest (default) or minute (legacy behavior).")
+    parser.add_argument("--classifier-backend", choices=CLASSIFIER_BACKENDS, default="speciesnet",
+                        help="Classifier backend implementation (default: speciesnet).")
+    parser.add_argument("--use-exif-timestamps", action="store_true", dest="use_exif_timestamps",
+                        help="Use EXIF/modified-time fallback for non-standard filenames (recommended, default: on).")
+    parser.add_argument("--no-exif-timestamps", action="store_false", dest="use_exif_timestamps",
+                        help="Advanced: disable fallback and require strict timestamp-style filenames only.")
+    parser.add_argument("--report-csv", default=None,
+                        help="Optional path to write species/category counts CSV.")
+    parser.add_argument("--dedupe-exact", action="store_true",
+                        help="Skip exact duplicate files based on content hash.")
+    parser.add_argument("--event-window-seconds", type=int, default=0,
+                        help="Merge adjacent timestamp events within this gap in seconds (default: 0, disabled).")
+    parser.add_argument("--checkpoint-file", default=None,
+                        help="Optional checkpoint JSON path for completed event keys.")
+    parser.add_argument("--resume-from-checkpoint", action="store_true",
+                        help="Skip events already listed in --checkpoint-file.")
     parser.add_argument("-v", "--verbose", action="store_true")
+    parser.set_defaults(use_exif_timestamps=True)
     args = parser.parse_args()
+
+    if args.region and (args.country or "").upper() != "USA":
+        parser.error("--region requires --country USA")
+
+    if args.confidence is not None and not (0.0 <= args.confidence <= 1.0):
+        parser.error("--confidence must be between 0 and 1")
+    if args.event_window_seconds < 0:
+        parser.error("--event-window-seconds must be >= 0")
+
+    confidence_threshold = resolve_confidence_threshold(
+        confidence=args.confidence,
+        profile=args.confidence_profile,
+    )
 
     level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(format=LOG_FMT, level=level, stream=sys.stdout)
     log = logging.getLogger("trailcam_sorter")
+    if args.confidence is None:
+        log.info(
+            "Using confidence profile '%s' (threshold %.2f)",
+            args.confidence_profile,
+            confidence_threshold,
+        )
+    else:
+        log.info("Using explicit confidence threshold %.2f", confidence_threshold)
 
     source = Path(args.source).resolve()
     if not source.is_dir():
@@ -971,7 +1676,7 @@ def main():
     run_sort(
         source=source,
         dest_root=Path(args.output).resolve(),
-        confidence=args.confidence,
+        confidence=confidence_threshold,
         country=args.country,
         region=args.region,
         move=args.move,
@@ -980,7 +1685,15 @@ def main():
         log=log,
         subfolders=not args.no_subfolders,
         sharpness=args.sharpest,
+        classifier_backend=args.classifier_backend,
+        dedupe_exact=args.dedupe_exact,
+        video_match_mode=args.video_match_mode,
+        use_exif_timestamps=args.use_exif_timestamps,
         recursive=not args.no_recursive,
+        event_window_seconds=args.event_window_seconds,
+        report_csv=Path(args.report_csv).resolve() if args.report_csv else None,
+        checkpoint_path=Path(args.checkpoint_file).resolve() if args.checkpoint_file else None,
+        resume_from_checkpoint=args.resume_from_checkpoint,
     )
 
 
