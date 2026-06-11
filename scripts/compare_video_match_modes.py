@@ -18,12 +18,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from trailcam_sorter import (
     VIDEO_MATCH_MAX_GAP_SECONDS,
+    build_video_match_candidates,
     classify_images,
     group_events,
     load_model,
-    parse_event_key_timestamp,
+    match_video_event,
     pick_representative,
-    sanitize_label,
 )
 
 
@@ -38,40 +38,13 @@ def build_assignments(
     if mode not in {"minute", "nearest"}:
         raise ValueError(f"Unsupported mode: {mode}")
 
-    minute_species: dict[str, str] = {}
-    candidates: list[tuple[object, str, float]] = []
-
-    for event_key, rep in rep_map.items():
-        pred = predictions.get(str(rep), {})
-        label = pred.get("prediction", "")
-        score = pred.get("prediction_score", 0.0) or 0.0
-        species = sanitize_label(label) if label else ""
-        ts = parse_event_key_timestamp(event_key)
-        if ts and species and species.lower() != "blank" and score >= min_confidence and "unknown" not in label.lower():
-            minute_species[event_key[:13]] = species
-            candidates.append((ts, species, float(score)))
+    minute_species, candidates = build_video_match_candidates(rep_map, predictions, min_confidence)
 
     assignments: dict[str, str | None] = {}
     for event_key in events:
         if event_key in rep_map:
             continue
-
-        if mode == "minute":
-            assignments[event_key] = minute_species.get(event_key[:13])
-            continue
-
-        species_name = None
-        event_ts = parse_event_key_timestamp(event_key)
-        if event_ts and candidates:
-            ranked = sorted(
-                candidates,
-                key=lambda c: (abs((c[0] - event_ts).total_seconds()), -c[2]),
-            )
-            best_ts, best_species, _ = ranked[0]
-            gap_s = abs((best_ts - event_ts).total_seconds())
-            if gap_s <= VIDEO_MATCH_MAX_GAP_SECONDS:
-                species_name = best_species
-
+        species_name, _ = match_video_event(event_key, mode, minute_species, candidates)
         assignments[event_key] = species_name
 
     return assignments
@@ -94,7 +67,7 @@ def main() -> int:
     if not source.is_dir():
         raise SystemExit(f"Source folder not found: {source}")
 
-    events = group_events(source, recursive=True)
+    events = group_events(source, recursive=True, use_exif_timestamps=True)
     rep_map: dict[str, Path] = {}
     images_to_classify: list[Path] = []
     for event_key, files in events.items():

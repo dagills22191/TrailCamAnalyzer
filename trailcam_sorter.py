@@ -449,6 +449,57 @@ class RunResult:
     checkpoint_path: Optional[Path] = None
 
 
+def build_video_match_candidates(
+    rep_map: dict[str, Path],
+    predictions: dict[str, dict],
+    min_confidence: float,
+) -> tuple[dict[str, str], list[tuple[datetime, str, float]]]:
+    """Build matching candidates from confidently classified image events.
+
+    Returns (minute_species, nearest_candidates):
+    - minute_species: {minute_prefix: species} for legacy minute-bucket matching
+    - nearest_candidates: [(timestamp, species, score), ...] for nearest matching
+    """
+    minute_species: dict[str, str] = {}
+    candidates: list[tuple[datetime, str, float]] = []
+    for ek, rep in rep_map.items():
+        pred = predictions.get(str(rep), {})
+        lbl = pred.get("prediction", "")
+        sc = pred.get("prediction_score", 0.0) or 0.0
+        sp = sanitize_label(lbl) if lbl else ""
+        ts = parse_event_key_timestamp(ek)
+        if ts and sp and sp.lower() != "blank" and sc >= min_confidence and "unknown" not in lbl.lower():
+            minute_species[ek[:13]] = sp
+            candidates.append((ts, sp, float(sc)))
+    return minute_species, candidates
+
+
+def match_video_event(
+    event_key: str,
+    mode: str,
+    minute_species: dict[str, str],
+    candidates: list[tuple[datetime, str, float]],
+) -> tuple[Optional[str], Optional[float]]:
+    """Match a video-only event to a species using the selected strategy.
+
+    Returns (species, gap_seconds). gap_seconds is only set for nearest matches.
+    """
+    if mode == "minute":
+        return minute_species.get(event_key[:13]), None
+
+    event_ts = parse_event_key_timestamp(event_key)
+    if event_ts and candidates:
+        ranked = sorted(
+            candidates,
+            key=lambda c: (abs((c[0] - event_ts).total_seconds()), -c[2]),
+        )
+        best_ts, best_species, _ = ranked[0]
+        gap_s = abs((best_ts - event_ts).total_seconds())
+        if gap_s <= VIDEO_MATCH_MAX_GAP_SECONDS:
+            return best_species, gap_s
+    return None, None
+
+
 def compute_file_sha256(path: Path, chunk_size: int = 1024 * 1024) -> Optional[str]:
     """Compute SHA256 for exact duplicate detection; returns None on read failure."""
     try:
@@ -504,17 +555,9 @@ def sort_files(
     duplicates_skipped = 0
 
     # Build candidates for video-only matching from confidently classified image events.
-    minute_species: dict[str, str] = {}
-    video_match_candidates: list[tuple[datetime, str, float]] = []
-    for ek in rep_map:
-        pred = predictions.get(str(rep_map[ek]), {})
-        lbl = pred.get("prediction", "")
-        sc = pred.get("prediction_score", 0.0) or 0.0
-        sp = sanitize_label(lbl) if lbl else ""
-        ts = parse_event_key_timestamp(ek)
-        if ts and sp and sp.lower() != "blank" and sc >= min_confidence and "unknown" not in lbl.lower():
-            minute_species[ek[:13]] = sp
-            video_match_candidates.append((ts, sp, float(sc)))
+    minute_species, video_match_candidates = build_video_match_candidates(
+        rep_map, predictions, min_confidence,
+    )
 
     total_events = len(events)
     for i, (event_key, files) in enumerate(events.items()):
@@ -526,34 +569,25 @@ def sort_files(
         rep = rep_map.get(event_key)
         if rep is None:
             local_video_match_stats["video_only_events"] += 1
-            species_name = None
-            if video_match_mode == "minute":
-                species_name = minute_species.get(event_key[:13])
-                if species_name:
+            species_name, gap_s = match_video_event(
+                event_key, video_match_mode, minute_species, video_match_candidates,
+            )
+            if species_name:
+                if video_match_mode == "minute":
                     local_video_match_stats["video_matched_minute"] += 1
                     log.debug(
                         "Event %s: video matched to '%s' by legacy minute bucket",
                         event_key,
                         species_name,
                     )
-            else:
-                event_ts = parse_event_key_timestamp(event_key)
-                if event_ts and video_match_candidates:
-                    ranked = sorted(
-                        video_match_candidates,
-                        key=lambda c: (abs((c[0] - event_ts).total_seconds()), -c[2]),
+                else:
+                    local_video_match_stats["video_matched_nearest"] += 1
+                    log.debug(
+                        "Event %s: video matched to '%s' by nearest image event (%.0f sec gap)",
+                        event_key,
+                        species_name,
+                        gap_s,
                     )
-                    best_ts, best_species, _ = ranked[0]
-                    gap_s = abs((best_ts - event_ts).total_seconds())
-                    if gap_s <= VIDEO_MATCH_MAX_GAP_SECONDS:
-                        species_name = best_species
-                        local_video_match_stats["video_matched_nearest"] += 1
-                        log.debug(
-                            "Event %s: video matched to '%s' by nearest image event (%.0f sec gap)",
-                            event_key,
-                            species_name,
-                            gap_s,
-                        )
 
             if not species_name:
                 local_video_match_stats["video_unmatched"] += 1
@@ -1486,7 +1520,7 @@ class TrailCamGUI:
                         self.pct_label.configure(text="")
                 elif kind == "done":
                     self._set_progress(1.0 if value == "ok" else self.progress.get())
-                    self.run_btn.configure(state="normal", text="Run")
+                    self.run_btn.configure(state="normal", text="▶  Run Sort")
                     self.cancel_btn.configure(state="disabled")
                     self.close_btn.configure(state="normal")
                     self._running = False
@@ -1569,8 +1603,8 @@ class TrailCamGUI:
             except Cancelled:
                 self._q.put(("log", "Run cancelled."))
                 self._q.put(("done", "cancelled"))
-            except Exception as exc:
-                log.error("Unexpected error: %s", exc)
+            except Exception:
+                log.exception("Unexpected error")
                 self._q.put(("done", "error"))
 
         threading.Thread(target=worker, daemon=True).start()
