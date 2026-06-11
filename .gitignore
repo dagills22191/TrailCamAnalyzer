@@ -24,6 +24,7 @@ installer/__pycache__/
 # Claude Code project instructions and planning docs (local only)
 CLAUDE.md
 docs/superpowers/
+reddit_drafts.md
 
 # OS
 .DS_Store
