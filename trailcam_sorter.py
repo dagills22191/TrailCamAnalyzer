@@ -1242,6 +1242,9 @@ class TrailCamGUI:
         # Defaults reused outside _build_ui (e.g. resetting after a pending cancel).
         self._progress_color = GREEN
         self._status_color = DIM
+        self._err_color = "#c0392b"
+        self._pending_result = None
+        self._pending_error = None
 
         def section_header(text: str):
             row = ctk.CTkFrame(self.root, fg_color="transparent")
@@ -1542,6 +1545,40 @@ class TrailCamGUI:
         )
         self.status_label.pack(anchor="w", padx=14, pady=(2, 12))
 
+        # ── Summary card (populated on completion) ───────────────────────
+        self.summary_card = ctk.CTkFrame(run_card, fg_color=INNER, corner_radius=8)
+        # Not packed yet; _render_summary packs it when there is something to show.
+
+        self.summary_banner = ctk.CTkLabel(
+            self.summary_card, text="", anchor="w",
+            font=ctk.CTkFont(size=12, weight="bold"),
+        )  # packed/hidden dynamically
+
+        header_row = ctk.CTkFrame(self.summary_card, fg_color="transparent")
+        header_row.pack(fill="x", padx=12, pady=(10, 4))
+        ctk.CTkLabel(
+            header_row, text="RESULTS", anchor="w",
+            font=ctk.CTkFont(size=12, weight="bold"), text_color=TEXT,
+        ).pack(side="left")
+        self.open_folder_btn = ctk.CTkButton(
+            header_row, text="Open folder", height=28, width=110,
+            fg_color=GREEN, hover_color=GREEN_H,
+            font=ctk.CTkFont(size=12), command=self._open_folder,
+        )
+        self.open_folder_btn.pack(side="right")
+
+        self.summary_body = ctk.CTkLabel(
+            self.summary_card, text="", anchor="w", justify="left",
+            font=ctk.CTkFont(size=12, family="Consolas"), text_color=TEXT,
+        )
+        self.summary_body.pack(fill="x", padx=12, pady=(0, 4))
+
+        self.summary_meta = ctk.CTkLabel(
+            self.summary_card, text="", anchor="w", justify="left",
+            font=ctk.CTkFont(size=11), text_color=DIM,
+        )
+        self.summary_meta.pack(fill="x", padx=12, pady=(0, 10))
+
         # ── Activity log ─────────────────────────────────────────────────
         section_header("ACTIVITY LOG")
         self.log_box = ctk.CTkTextbox(
@@ -1608,12 +1645,17 @@ class TrailCamGUI:
                     self._busy = busy
                     if busy:
                         self.pct_label.configure(text="")
+                elif kind == "result":
+                    self._pending_result = value
+                elif kind == "error":
+                    self._pending_error = value
                 elif kind == "done":
                     self._set_progress(1.0 if value == "ok" else self.progress.get())
                     self.run_btn.configure(state="normal", text="▶  Run Sort")
                     self.cancel_btn.configure(state="disabled")
                     self.close_btn.configure(state="normal")
                     self._running = False
+                    self._render_summary(value)
                     return
         except queue.Empty:
             pass
@@ -1643,6 +1685,60 @@ class TrailCamGUI:
             )
         else:
             self._append_log("Cancelling — will stop after the current operation…")
+
+    def _render_summary(self, status: str):
+        """Populate + show the summary card from stashed result/error state.
+
+        Called once from the 'done' handler. `status` is 'ok' | 'cancelled' |
+        'error'. Cancelled runs show nothing (card stays hidden).
+        """
+        if status == "error":
+            msg = self._pending_error or "Run failed — see the activity log for details."
+            self.summary_banner.configure(text=f"⚠ Error: {msg}", text_color=self._err_color)
+            self.summary_banner.pack(fill="x", padx=12, pady=(10, 0))
+            self.summary_body.configure(text="")
+            self.summary_meta.configure(text="")
+            self.open_folder_btn.configure(state="disabled")
+            self.summary_card.pack(fill="x", padx=14, pady=(0, 12))
+            from tkinter import messagebox
+            messagebox.showerror("Sort failed", msg, parent=self.root)
+            return
+
+        if status != "ok" or self._pending_result is None:
+            return  # cancelled or nothing to show
+
+        s = format_run_summary(self._pending_result)
+        self._summary_output = s["output"]
+
+        if s["banner"] is not None:
+            _, text = s["banner"]  # dry-run banner
+            self.summary_banner.configure(text=text, text_color=WARN_AMBER)
+            self.summary_banner.pack(fill="x", padx=12, pady=(10, 0))
+        else:
+            self.summary_banner.pack_forget()
+
+        width = 30
+        lines = [f"{label:.<{width}} {count}" for label, count in s["rows"]]
+        lines.append(f"{'-' * width}")
+        lines.append(f"{'TOTAL':.<{width}} {s['total']}")
+        self.summary_body.configure(text="\n".join(lines))
+
+        meta_parts = [s["timing"]]
+        if s["reports"]:
+            meta_parts.append("report: " + " · ".join(s["reports"]))
+        self.summary_meta.configure(text="\n".join(meta_parts))
+
+        self.open_folder_btn.configure(state="normal")
+        self.summary_card.pack(fill="x", padx=14, pady=(0, 12))
+
+    def _open_folder(self):
+        path = getattr(self, "_summary_output", None)
+        if not path:
+            return
+        try:
+            open_in_file_manager(Path(path))
+        except ValueError as e:
+            self._append_log(str(e))
 
     def _on_close(self):
         """Window-close handler: confirm and cancel a running sort before quitting."""
@@ -1685,6 +1781,9 @@ class TrailCamGUI:
         self.progress.configure(progress_color=self._progress_color)
         self.pct_label.configure(text="")
         self.status_label.configure(text="", text_color=self._status_color)
+        self.summary_card.pack_forget()
+        self._pending_result = None
+        self._pending_error = None
         self._cancel_event.clear()
         self.run_btn.configure(state="disabled", text="Running…")
         self.cancel_btn.configure(state="normal", text="Cancel")
@@ -1704,7 +1803,7 @@ class TrailCamGUI:
 
         def worker():
             try:
-                run_sort(
+                result = run_sort(
                     source=source.resolve(),
                     dest_root=dest_root,
                     confidence=self.conf_var.get(),
@@ -1727,12 +1826,14 @@ class TrailCamGUI:
                     cancel_event=self._cancel_event,
                 )
                 save_config({"last_output": str(dest_root)})
+                self._q.put(("result", result))
                 self._q.put(("done", "ok"))
             except Cancelled:
                 self._q.put(("log", "Run cancelled."))
                 self._q.put(("done", "cancelled"))
-            except Exception:
+            except Exception as e:
                 log.exception("Unexpected error")
+                self._q.put(("error", str(e)))
                 self._q.put(("done", "error"))
 
         threading.Thread(target=worker, daemon=True).start()
