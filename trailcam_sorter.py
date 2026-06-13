@@ -1119,6 +1119,12 @@ def run_sort(
 
     status(f"Running inference on {len(images_to_classify)} images…")
     inference_start = time.perf_counter()
+    _outer_progress = progress_callback
+
+    def _inference_progress(frac: float):
+        if _outer_progress:
+            _outer_progress(0.20 + 0.65 * frac)
+
     predictions = classify_with_backend(
         classifier_backend,
         model,
@@ -1126,6 +1132,8 @@ def run_sort(
         country,
         region,
         log,
+        cancel_event=cancel_event,
+        progress_callback=_inference_progress,
     )
     phase_timings["inference"] = time.perf_counter() - inference_start
     if progress_callback:
