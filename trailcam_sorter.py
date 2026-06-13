@@ -42,6 +42,11 @@ from typing import Callable, Literal, Optional
 # Constants
 # ---------------------------------------------------------------------------
 
+__version__ = "1.1.1"
+
+# Amber accent used to signal a pending cancel (progress bar + status text).
+WARN_AMBER = "#d4912f"
+
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 
 COUNTRY_CODES = [
@@ -299,7 +304,7 @@ def pick_representative(files: list[Path], use_sharpness: bool = False) -> Optio
     if not images:
         return None
 
-    if use_sharpness and len(images) > 1:
+    if use_sharpness and len(images) > 1 and is_cv2_available():
         scored = [(score_sharpness(f), f) for f in images]
         return max(scored, key=lambda x: x[0])[1]
 
@@ -334,6 +339,34 @@ def is_cv2_available() -> bool:
         return True
     except Exception:
         return False
+
+
+def check_dest_not_in_source(source: Path, dest_root: Path) -> None:
+    """Raise ValueError if ``dest_root`` is the same as or nested inside ``source``.
+
+    Writing the sorted output into the folder being scanned risks copying files
+    into themselves and re-scanning freshly copied files on recursive runs.
+    Both paths should already be resolved by the caller.
+    """
+    if dest_root == source or dest_root.is_relative_to(source):
+        raise ValueError(
+            f"Output folder ({dest_root}) is inside the source folder ({source}). "
+            "Choose an output location outside the source folder."
+        )
+
+
+def check_dest_not_a_file(dest_root: Path) -> None:
+    """Raise ValueError if ``dest_root`` already exists as a file (not a directory).
+
+    The output root must be a directory; pointing it at an existing file would
+    fail later when creating species subfolders. The path should already be
+    resolved by the caller.
+    """
+    if dest_root.exists() and not dest_root.is_dir():
+        raise ValueError(
+            f"Output folder ({dest_root}) is an existing file, not a directory. "
+            "Choose a different output location."
+        )
 
 
 def parse_event_key_timestamp(event_key: str) -> Optional[datetime]:
@@ -1122,7 +1155,7 @@ class TrailCamGUI:
         ctk.set_default_color_theme("blue")
 
         self.root = ctk.CTk()
-        self.root.title("TrailCam Sorter")
+        self.root.title(f"TrailCam Sorter v{__version__}")
         self.root.geometry("820x790")
         self.root.resizable(True, True)
         self.root.minsize(680, 580)
@@ -1134,6 +1167,7 @@ class TrailCamGUI:
         self._anim_tick = 0.0
         self._cancel_event = threading.Event()
 
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._build_ui()
 
     def _build_ui(self):
@@ -1152,6 +1186,9 @@ class TrailCamGUI:
         DIM      = "#6a8090"
         MUTED    = "#4a6070"
         SEP      = "#2a3a4a"
+        # Defaults reused outside _build_ui (e.g. resetting after a pending cancel).
+        self._progress_color = GREEN
+        self._status_color = DIM
 
         def section_header(text: str):
             row = ctk.CTkFrame(self.root, fg_color="transparent")
@@ -1425,7 +1462,7 @@ class TrailCamGUI:
             fg_color=INNER, hover_color=CLOSE_H,
             border_width=1, border_color=SEP,
             font=ctk.CTkFont(size=13), text_color=DIM,
-            command=self.root.destroy,
+            command=self._on_close,
         )
         self.close_btn.grid(row=0, column=2)
 
@@ -1537,7 +1574,35 @@ class TrailCamGUI:
     def _on_cancel(self):
         self._cancel_event.set()
         self.cancel_btn.configure(state="disabled", text="Cancelling…")
-        self._append_log("Cancelling — will stop after current operation...")
+        if self._busy:
+            # Model load / inference run as a single atomic call and cannot be
+            # interrupted partway; cancel takes effect the moment it returns.
+            # Recolour the bar + status amber so the pending cancel is obvious
+            # even though the bar keeps animating (work IS still happening).
+            self.progress.configure(progress_color=WARN_AMBER)
+            self.status_label.configure(
+                text="⚠ Cancelling — finishing current inference batch first…",
+                text_color=WARN_AMBER,
+            )
+            self._append_log(
+                "Cancelling — the current inference batch can't be stopped midway; "
+                "it will stop as soon as that finishes (the bar keeps moving until then)."
+            )
+        else:
+            self._append_log("Cancelling — will stop after the current operation…")
+
+    def _on_close(self):
+        """Window-close handler: confirm and cancel a running sort before quitting."""
+        if self._running:
+            from tkinter import messagebox
+            if not messagebox.askyesno(
+                "Quit while running?",
+                "A sort is still running. Cancel it and quit?",
+                parent=self.root,
+            ):
+                return
+            self._cancel_event.set()
+        self.root.destroy()
 
     def _on_run(self):
         if self._running:
@@ -1552,10 +1617,21 @@ class TrailCamGUI:
             self._append_log(f"Folder not found: {source}")
             return
 
+        dest_root = Path(self.out_var.get().strip()).resolve()
+        try:
+            check_dest_not_a_file(dest_root)
+            check_dest_not_in_source(source.resolve(), dest_root)
+        except ValueError as e:
+            from tkinter import messagebox
+            messagebox.showerror("Invalid output folder", str(e), parent=self.root)
+            self._append_log(str(e))
+            return
+
         self.log_box.delete("1.0", "end")
         self._set_progress(0)
+        self.progress.configure(progress_color=self._progress_color)
         self.pct_label.configure(text="")
-        self.status_label.configure(text="")
+        self.status_label.configure(text="", text_color=self._status_color)
         self._cancel_event.clear()
         self.run_btn.configure(state="disabled", text="Running…")
         self.cancel_btn.configure(state="normal", text="Cancel")
@@ -1570,7 +1646,6 @@ class TrailCamGUI:
         handler.setFormatter(logging.Formatter(LOG_FMT_SHORT))
         log.addHandler(handler)
 
-        dest_root = Path(self.out_var.get().strip()).resolve()
         country = self.country_var.get().strip() or None
         region = self.region_var.get().strip() or None
 
@@ -1673,6 +1748,8 @@ def main():
     parser.add_argument("--resume-from-checkpoint", action="store_true",
                         help="Skip events already listed in --checkpoint-file.")
     parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("--version", action="version",
+                        version=f"%(prog)s {__version__}")
     parser.set_defaults(use_exif_timestamps=True)
     args = parser.parse_args()
 
@@ -1706,9 +1783,17 @@ def main():
         log.error("Source folder not found: %s", source)
         sys.exit(1)
 
+    dest_root = Path(args.output).resolve()
+    try:
+        check_dest_not_a_file(dest_root)
+        check_dest_not_in_source(source, dest_root)
+    except ValueError as e:
+        log.error("%s", e)
+        sys.exit(1)
+
     run_sort(
         source=source,
-        dest_root=Path(args.output).resolve(),
+        dest_root=dest_root,
         confidence=confidence_threshold,
         country=args.country,
         region=args.region,

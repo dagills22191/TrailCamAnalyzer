@@ -27,6 +27,22 @@ from trailcam_sorter import (
 )
 
 
+def test_sharpness_falls_back_to_deterministic_pick_when_cv2_unavailable(tmp_path, monkeypatch):
+    """When --sharpest is set but cv2 is unavailable, pick_representative must fall
+    back to the deterministic base-image selection, not the arbitrary list order."""
+    import trailcam_sorter
+    monkeypatch.setattr(trailcam_sorter, "is_cv2_available", lambda: False)
+
+    base = tmp_path / "20230101_120000.jpg"
+    variant = tmp_path / "20230101_120000_2.jpg"
+    make_image(base)
+    make_image(variant)
+
+    # Pass variant first so a non-deterministic fallback would wrongly return it.
+    rep = pick_representative([variant, base], use_sharpness=True)
+    assert rep == base
+
+
 def make_image(path: Path, blur_radius: int = 0) -> Path:
     """Write a synthetic grayscale jpg. blur_radius=0 = sharp; >0 = blurry."""
     img = np.random.randint(0, 256, (480, 640), dtype=np.uint8)
