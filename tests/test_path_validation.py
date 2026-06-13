@@ -5,7 +5,11 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from trailcam_sorter import check_dest_not_in_source, check_dest_not_a_file
+from trailcam_sorter import (
+    check_dest_not_in_source,
+    check_dest_not_a_file,
+    open_in_file_manager,
+)
 
 
 def test_dest_existing_file_is_rejected(tmp_path):
@@ -61,3 +65,16 @@ def test_dest_as_parent_of_source_is_allowed(tmp_path):
     source.mkdir(parents=True)
     # Writing to a parent of source is allowed; only dest-in-source is dangerous.
     check_dest_not_in_source(source.resolve(), dest.resolve())
+
+
+def test_open_in_file_manager_rejects_missing_path(tmp_path):
+    missing = tmp_path / "nope"
+    with pytest.raises(ValueError):
+        open_in_file_manager(missing.resolve())
+
+
+def test_open_in_file_manager_rejects_file(tmp_path):
+    f = tmp_path / "a.txt"
+    f.write_text("x")
+    with pytest.raises(ValueError):
+        open_in_file_manager(f.resolve())

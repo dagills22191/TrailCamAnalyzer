@@ -26,9 +26,11 @@ import csv
 import hashlib
 import json
 import logging
+import os
 import queue
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -396,6 +398,28 @@ def format_run_summary(result: "RunResult") -> dict:
         "banner": banner,
         "output": str(result.output),
     }
+
+
+def open_in_file_manager(path: Path) -> None:
+    """Open a folder in the OS file manager.
+
+    Raises ValueError if `path` is not an existing directory (the tested
+    contract). A missing launcher or non-zero exit is logged and ignored so it
+    never crashes the GUI.
+    """
+    if not path.is_dir():
+        raise ValueError(f"Not a directory: {path}")
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(str(path))  # type: ignore[attr-defined]  # Windows only
+        elif sys.platform == "darwin":
+            subprocess.run(["open", str(path)], check=False)
+        else:
+            subprocess.run(["xdg-open", str(path)], check=False)
+    except (OSError, ValueError) as e:
+        logging.getLogger("trailcam_sorter").warning(
+            "Could not open folder %s: %s", path, e
+        )
 
 
 def parse_event_key_timestamp(event_key: str) -> Optional[datetime]:
