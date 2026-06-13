@@ -110,6 +110,57 @@ def save_config(data: dict):
     except Exception:
         pass
 
+def _as_bool(value, default: bool) -> bool:
+    """Coerce a possibly hand-edited/legacy config value to bool."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return default
+
+
+def resolve_startup_settings(config: dict) -> dict:
+    """Map a loaded config dict to concrete GUI field values.
+
+    Applies defaults for missing keys, forces move/dry_run off, clamps
+    confidence into the slider's 0.1-0.9 range, and clears region when
+    country is not USA. Returns a dict keyed by the persisted config-key
+    names, plus ``move`` and ``dry_run`` set to False so the GUI can
+    initialize every var from one dict.
+    """
+    config = config if isinstance(config, dict) else {}
+
+    try:
+        confidence = float(config.get("confidence", 0.4))
+        confidence = min(0.9, max(0.1, confidence))
+    except (TypeError, ValueError):
+        confidence = 0.4
+
+    country = str(config.get("country", "") or "")
+    region = str(config.get("region", "") or "")
+    if country != "USA":
+        region = ""
+
+    return {
+        "last_source": str(config.get("last_source", "") or ""),
+        "last_output": str(config.get("last_output")
+                           or (Path.home() / "TrailCamAnimals")),
+        "advanced_mode": _as_bool(config.get("advanced_mode"), False),
+        "recursive": _as_bool(config.get("recursive"), True),
+        "country": country,
+        "region": region,
+        "confidence": confidence,
+        "species_subfolders": _as_bool(config.get("species_subfolders"), True),
+        "sharpness": _as_bool(config.get("sharpness"), False),
+        "exif_fallback": _as_bool(config.get("exif_fallback"), True),
+        # Action toggles always start in the safe state, never persisted.
+        "move": False,
+        "dry_run": False,
+    }
+
+
 def load_checkpoint(checkpoint_path: Path) -> set[str]:
     """Load completed event keys from a checkpoint file."""
     if not checkpoint_path.is_file():
@@ -1227,6 +1278,7 @@ class TrailCamGUI:
 
     def _build_ui(self):
         ctk = self.ctk
+        self._settings = resolve_startup_settings(load_config())
 
         BG       = "#161c24"
         CARD     = "#1e2736"
@@ -1289,7 +1341,7 @@ class TrailCamGUI:
             font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
             text_color=DIM, width=64, anchor="w",
         ).grid(row=0, column=0, padx=(16, 6), pady=(16, 6), sticky="w")
-        self.src_var = ctk.StringVar()
+        self.src_var = ctk.StringVar(value=self._settings["last_source"])
         ctk.CTkEntry(
             folders, textvariable=self.src_var,
             placeholder_text="Select the folder containing trail-cam files…",
@@ -1308,8 +1360,7 @@ class TrailCamGUI:
             font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
             text_color=DIM, width=64, anchor="w",
         ).grid(row=1, column=0, padx=(16, 6), pady=(6, 16), sticky="w")
-        default_out = load_config().get("last_output", str(Path.home() / "TrailCamAnimals"))
-        self.out_var = ctk.StringVar(value=default_out)
+        self.out_var = ctk.StringVar(value=self._settings["last_output"])
         ctk.CTkEntry(
             folders, textvariable=self.out_var,
             fg_color=INNER, border_color=SEP, border_width=1,
@@ -1330,7 +1381,7 @@ class TrailCamGUI:
         mode_row = ctk.CTkFrame(opts, fg_color="transparent")
         mode_row.pack(fill="x", padx=16, pady=(12, 4))
 
-        self.advanced_mode_var = ctk.BooleanVar(value=False)
+        self.advanced_mode_var = ctk.BooleanVar(value=self._settings["advanced_mode"])
         ctk.CTkCheckBox(
             mode_row,
             text="Advanced mode",
@@ -1353,19 +1404,19 @@ class TrailCamGUI:
         basic_row = ctk.CTkFrame(opts, fg_color="transparent")
         basic_row.pack(fill="x", padx=16, pady=(6, 8))
 
-        self.recursive_var = ctk.BooleanVar(value=True)
+        self.recursive_var = ctk.BooleanVar(value=self._settings["recursive"])
         ctk.CTkCheckBox(
             basic_row, text="Scan subfolders", variable=self.recursive_var,
             fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
         ).pack(side="left", padx=(0, 22))
 
-        self.move_var = ctk.BooleanVar(value=False)
+        self.move_var = ctk.BooleanVar(value=self._settings["move"])
         ctk.CTkCheckBox(
             basic_row, text="Move files", variable=self.move_var,
             fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
         ).pack(side="left", padx=(0, 22))
 
-        self.dry_var = ctk.BooleanVar(value=False)
+        self.dry_var = ctk.BooleanVar(value=self._settings["dry_run"])
         ctk.CTkCheckBox(
             basic_row, text="Dry run", variable=self.dry_var,
             fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
@@ -1380,7 +1431,7 @@ class TrailCamGUI:
             font=ctk.CTkFont(size=11),
             text_color=DIM,
         ).pack(side="left", padx=(0, 6))
-        self.country_var = ctk.StringVar(value="")
+        self.country_var = ctk.StringVar(value=self._settings["country"])
         self.country_combo = ctk.CTkComboBox(
             basic_geo_row,
             variable=self.country_var,
@@ -1403,7 +1454,7 @@ class TrailCamGUI:
             font=ctk.CTkFont(size=11),
             text_color=DIM,
         ).pack(side="left", padx=(0, 6))
-        self.region_var = ctk.StringVar(value="")
+        self.region_var = ctk.StringVar(value=self._settings["region"])
         self.region_combo = ctk.CTkComboBox(
             basic_geo_row,
             variable=self.region_var,
@@ -1426,7 +1477,7 @@ class TrailCamGUI:
             font=ctk.CTkFont(size=11),
             text_color=DIM,
         ).pack(side="left", padx=(0, 8))
-        self.conf_var = ctk.DoubleVar(value=0.4)
+        self.conf_var = ctk.DoubleVar(value=self._settings["confidence"])
         ctk.CTkSlider(
             basic_geo_row,
             from_=0.1,
@@ -1442,7 +1493,7 @@ class TrailCamGUI:
         ).pack(side="left")
         self.conf_label = ctk.CTkLabel(
             basic_geo_row,
-            text="0.40",
+            text=f"{self._settings['confidence']:.2f}",
             width=40,
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color=TEXT,
@@ -1470,25 +1521,27 @@ class TrailCamGUI:
         chk_row = ctk.CTkFrame(self.advanced_frame, fg_color="transparent")
         chk_row.pack(fill="x", padx=16, pady=(0, 14))
 
-        self.subfolders_var = ctk.BooleanVar(value=True)
+        self.subfolders_var = ctk.BooleanVar(value=self._settings["species_subfolders"])
         ctk.CTkCheckBox(
             chk_row, text="Species subfolders", variable=self.subfolders_var,
             fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
         ).pack(side="left", padx=(0, 22))
 
-        self.sharpness_var = ctk.BooleanVar(value=False)
+        self.sharpness_var = ctk.BooleanVar(value=self._settings["sharpness"])
         ctk.CTkCheckBox(
             chk_row, text="Pick sharpest frame", variable=self.sharpness_var,
             fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
         ).pack(side="left")
 
-        self.exif_var = ctk.BooleanVar(value=True)
+        self.exif_var = ctk.BooleanVar(value=self._settings["exif_fallback"])
         ctk.CTkCheckBox(
             chk_row, text="Use EXIF/modified-time fallback (recommended)", variable=self.exif_var,
             fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
         ).pack(side="left", padx=(22, 0))
 
-        self._set_advanced_mode(False)
+        self._set_advanced_mode(self._settings["advanced_mode"])
+        # Sync region combo enabled-state to the restored country.
+        self._on_country_change(self._settings["country"])
 
         # ── Run controls ─────────────────────────────────────────────────
         section_header("RUN")
@@ -1744,6 +1797,25 @@ class TrailCamGUI:
         except ValueError as e:
             self._append_log(str(e))
 
+    def _collect_settings(self) -> dict:
+        """Read current GUI fields into a config dict for persistence.
+
+        Excludes the move/dry_run action toggles, which always start in the
+        safe state on the next launch.
+        """
+        return {
+            "last_source": self.src_var.get().strip(),
+            "last_output": self.out_var.get().strip(),
+            "advanced_mode": self.advanced_mode_var.get(),
+            "recursive": self.recursive_var.get(),
+            "country": self.country_var.get().strip(),
+            "region": self.region_var.get().strip(),
+            "confidence": self.conf_var.get(),
+            "species_subfolders": self.subfolders_var.get(),
+            "sharpness": self.sharpness_var.get(),
+            "exif_fallback": self.exif_var.get(),
+        }
+
     def _on_close(self):
         """Window-close handler: confirm and cancel a running sort before quitting."""
         if self._running:
@@ -1755,6 +1827,7 @@ class TrailCamGUI:
             ):
                 return
             self._cancel_event.set()
+        save_config(self._collect_settings())
         self.root.destroy()
 
     def _on_run(self):
@@ -1779,6 +1852,8 @@ class TrailCamGUI:
             messagebox.showerror("Invalid output folder", str(e), parent=self.root)
             self._append_log(str(e))
             return
+
+        save_config(self._collect_settings())
 
         self.log_box.delete("1.0", "end")
         self._set_progress(0)
@@ -1830,7 +1905,6 @@ class TrailCamGUI:
                     status_callback=lambda s: self._q.put(("status", s)),
                     cancel_event=self._cancel_event,
                 )
-                save_config({"last_output": str(dest_root)})
                 self._q.put(("result", result))
                 self._q.put(("done", "ok"))
             except Cancelled:
