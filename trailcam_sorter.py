@@ -369,6 +369,35 @@ def check_dest_not_a_file(dest_root: Path) -> None:
         )
 
 
+def format_run_summary(result: "RunResult") -> dict:
+    """Convert a RunResult into a render-ready structure for the GUI summary card.
+
+    Keeps the card a dumb renderer. Tolerates the empty / video-only early-return
+    RunResults whose phase_timings lack 'inference'/'total_pipeline'.
+    """
+    rows = sorted(result.species_counts.items(), key=lambda kv: -kv[1])
+    total_time = result.phase_timings.get("total_pipeline", 0.0)
+    inference_time = result.phase_timings.get("inference", 0.0)
+    timing = f"time: {round(total_time)}s (inference {round(inference_time)}s)"
+
+    reports: list[str] = []
+    if result.report_path:
+        reports.append(Path(result.report_path).name)
+    if result.csv_report_path:
+        reports.append(Path(result.csv_report_path).name)
+
+    banner = ("dry_run", "DRY RUN — no files were moved.") if result.dry_run else None
+
+    return {
+        "rows": rows,
+        "total": result.total_files_sorted,
+        "timing": timing,
+        "reports": reports,
+        "banner": banner,
+        "output": str(result.output),
+    }
+
+
 def parse_event_key_timestamp(event_key: str) -> Optional[datetime]:
     """Parse event key like 20240615_083012 into a datetime."""
     try:
