@@ -565,10 +565,16 @@ def classify_with_backend(
     country: Optional[str],
     region: Optional[str],
     log: logging.Logger,
+    cancel_event: Optional[threading.Event] = None,
+    progress_callback: Optional[Callable[[float], None]] = None,
 ) -> dict[str, dict]:
     """Dispatch classification to the configured backend implementation."""
     if backend == "speciesnet":
-        return classify_images(model, image_paths, country, region, log)
+        return classify_images(
+            model, image_paths, country, region, log,
+            cancel_event=cancel_event,
+            progress_callback=progress_callback,
+        )
     raise ValueError(f"Unsupported classifier backend: {backend}")
 
 

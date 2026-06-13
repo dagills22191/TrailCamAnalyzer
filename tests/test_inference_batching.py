@@ -78,3 +78,17 @@ def test_progress_callback_reaches_one():
     assert seen == sorted(seen), "fractions must be non-decreasing"
     assert seen[-1] == 1.0
     assert all(0.0 <= f <= 1.0 for f in seen)
+
+
+def test_classify_with_backend_forwards_cancel_and_progress():
+    from trailcam_sorter import classify_with_backend
+    model = FakeModel()
+    seen = []
+    result = classify_with_backend(
+        "speciesnet", model, _paths(60), None, None, LOG,
+        cancel_event=None,
+        progress_callback=lambda f: seen.append(f),
+    )
+    assert len(result) == 60
+    assert model.batch_sizes == [50, 10]
+    assert seen[-1] == 1.0
