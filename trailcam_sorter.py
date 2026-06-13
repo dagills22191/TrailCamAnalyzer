@@ -48,6 +48,8 @@ __version__ = "1.1.1"
 
 # Amber accent used to signal a pending cancel (progress bar + status text).
 WARN_AMBER = "#d4912f"
+# Red accent used for the error banner on the summary card.
+ERROR_RED = "#c0392b"
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 
@@ -1242,7 +1244,7 @@ class TrailCamGUI:
         # Defaults reused outside _build_ui (e.g. resetting after a pending cancel).
         self._progress_color = GREEN
         self._status_color = DIM
-        self._err_color = "#c0392b"
+        self._err_color = ERROR_RED
         self._pending_result = None
         self._pending_error = None
 
@@ -1784,6 +1786,7 @@ class TrailCamGUI:
         self.summary_card.pack_forget()
         self._pending_result = None
         self._pending_error = None
+        self._summary_output = None
         self._cancel_event.clear()
         self.run_btn.configure(state="disabled", text="Running…")
         self.cancel_btn.configure(state="normal", text="Cancel")
