@@ -1211,7 +1211,7 @@ class TrailCamGUI:
 
         self.root = ctk.CTk()
         self.root.title(f"TrailCam Sorter v{__version__}")
-        self.root.geometry("820x790")
+        self.root.geometry("820x950")
         self.root.resizable(True, True)
         self.root.minsize(680, 580)
         self.root.configure(fg_color="#161c24")
@@ -1556,7 +1556,7 @@ class TrailCamGUI:
             font=ctk.CTkFont(size=12, weight="bold"),
         )  # packed/hidden dynamically
 
-        header_row = ctk.CTkFrame(self.summary_card, fg_color="transparent")
+        self._summary_header_row = header_row = ctk.CTkFrame(self.summary_card, fg_color="transparent")
         header_row.pack(fill="x", padx=12, pady=(10, 4))
         ctk.CTkLabel(
             header_row, text="RESULTS", anchor="w",
@@ -1585,6 +1585,7 @@ class TrailCamGUI:
         section_header("ACTIVITY LOG")
         self.log_box = ctk.CTkTextbox(
             self.root,
+            height=140,
             font=ctk.CTkFont(family="Consolas", size=11),
             fg_color=CARD,
             text_color="#6aab85",
@@ -1697,7 +1698,7 @@ class TrailCamGUI:
         if status == "error":
             msg = self._pending_error or "Run failed — see the activity log for details."
             self.summary_banner.configure(text=f"⚠ Error: {msg}", text_color=self._err_color)
-            self.summary_banner.pack(fill="x", padx=12, pady=(10, 0))
+            self.summary_banner.pack(fill="x", padx=12, pady=(10, 0), before=self._summary_header_row)
             self.summary_body.configure(text="")
             self.summary_meta.configure(text="")
             self.open_folder_btn.configure(state="disabled")
@@ -1715,7 +1716,7 @@ class TrailCamGUI:
         if s["banner"] is not None:
             _, text = s["banner"]  # dry-run banner
             self.summary_banner.configure(text=text, text_color=WARN_AMBER)
-            self.summary_banner.pack(fill="x", padx=12, pady=(10, 0))
+            self.summary_banner.pack(fill="x", padx=12, pady=(10, 0), before=self._summary_header_row)
         else:
             self.summary_banner.pack_forget()
 
@@ -1730,7 +1731,8 @@ class TrailCamGUI:
             meta_parts.append("report: " + " · ".join(s["reports"]))
         self.summary_meta.configure(text="\n".join(meta_parts))
 
-        self.open_folder_btn.configure(state="normal")
+        # A dry run writes nothing, so there is no output to open.
+        self.open_folder_btn.configure(state="disabled" if s["banner"] is not None else "normal")
         self.summary_card.pack(fill="x", padx=14, pady=(0, 12))
 
     def _open_folder(self):
