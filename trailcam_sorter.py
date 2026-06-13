@@ -93,6 +93,7 @@ LOG_FMT = "%(asctime)s  %(levelname)-8s  %(message)s"
 LOG_FMT_SHORT = "%(asctime)s  %(message)s"
 
 CONFIG_PATH = Path.home() / ".trailcam_sorter.json"
+INFERENCE_BATCH_SIZE = 50
 
 
 def load_config() -> dict:
@@ -512,29 +513,41 @@ def classify_images(
     country: Optional[str],
     region: Optional[str],
     log: logging.Logger,
+    cancel_event: Optional[threading.Event] = None,
+    progress_callback: Optional[Callable[[float], None]] = None,
 ) -> dict[str, dict]:
-    """Run SpeciesNet on a batch of representative images.
+    """Run SpeciesNet on representative images in cancellable batches.
 
-    Returns {filepath_str: prediction_record, ...}
+    Processes image_paths in chunks of INFERENCE_BATCH_SIZE. Between chunks it
+    honours cancel_event (raising Cancelled) and reports the fraction of images
+    classified so far via progress_callback. Returns {filepath_str: prediction}.
     """
-    instances = [{"filepath": str(p)} for p in image_paths]
-    instances_dict = {"instances": instances}
-
-    log.info("Running SpeciesNet on %d images...", len(instances))
+    total = len(image_paths)
+    log.info("Running SpeciesNet on %d images...", total)
     t0 = time.time()
-    kwargs: dict = {"instances_dict": instances_dict}
-    if country:
-        kwargs["country"] = country
-    if region:
-        kwargs["admin1_region"] = region
-    results = model.predict(**kwargs)
-    elapsed = time.time() - t0
-    log.info("Inference done in %.1f s  (%.2f s/image)",
-             elapsed, elapsed / max(len(instances), 1))
 
     lookup: dict[str, dict] = {}
-    for pred in results.get("predictions", []):
-        lookup[pred["filepath"]] = pred
+    done = 0
+    for start in range(0, total, INFERENCE_BATCH_SIZE):
+        if cancel_event and cancel_event.is_set():
+            raise Cancelled()
+        chunk = image_paths[start:start + INFERENCE_BATCH_SIZE]
+        instances = [{"filepath": str(p)} for p in chunk]
+        kwargs: dict = {"instances_dict": {"instances": instances}}
+        if country:
+            kwargs["country"] = country
+        if region:
+            kwargs["admin1_region"] = region
+        results = model.predict(**kwargs)
+        for pred in results.get("predictions", []):
+            lookup[pred["filepath"]] = pred
+        done += len(chunk)
+        if progress_callback:
+            progress_callback(done / total if total else 1.0)
+
+    elapsed = time.time() - t0
+    log.info("Inference done in %.1f s  (%.2f s/image)",
+             elapsed, elapsed / max(total, 1))
     return lookup
 
 
