@@ -1758,7 +1758,15 @@ class TrailCamGUI:
                 elif kind == "done":
                     self._set_progress(1.0 if value == "ok" else self.progress.get())
                     self.run_btn.configure(state="normal", text="▶  Run Sort")
-                    self.cancel_btn.configure(state="disabled")
+                    # Clear the transient "cancelling" affordances now that the
+                    # run has actually stopped — otherwise the amber status/bar
+                    # and "Cancelling…" button linger until the next run.
+                    self.cancel_btn.configure(state="disabled", text="Cancel")
+                    self.progress.configure(progress_color=self._progress_color)
+                    if value == "cancelled":
+                        self.status_label.configure(
+                            text="Cancelled.", text_color=self._status_color
+                        )
                     self.close_btn.configure(state="normal")
                     self._running = False
                     self._render_summary(value)
