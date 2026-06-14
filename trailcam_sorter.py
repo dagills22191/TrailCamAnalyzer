@@ -1289,9 +1289,9 @@ class TrailCamGUI:
 
         self.root = ctk.CTk()
         self.root.title(f"TrailCam Sorter v{__version__}")
-        self.root.geometry("820x950")
+        self.root.geometry("820x720")
         self.root.resizable(True, True)
-        self.root.minsize(680, 580)
+        self.root.minsize(680, 500)
         self.root.configure(fg_color="#161c24")
 
         self._q: queue.Queue = queue.Queue()
@@ -1327,8 +1327,8 @@ class TrailCamGUI:
         self._pending_result = None
         self._pending_error = None
 
-        def section_header(text: str):
-            row = ctk.CTkFrame(self.root, fg_color="transparent")
+        def section_header(text: str, parent=None):
+            row = ctk.CTkFrame(parent if parent is not None else self.root, fg_color="transparent")
             row.pack(fill="x", padx=16, pady=(10, 0))
             ctk.CTkLabel(
                 row, text=text,
@@ -1338,6 +1338,7 @@ class TrailCamGUI:
             ctk.CTkFrame(row, height=1, fg_color=SEP).pack(
                 side="left", fill="x", expand=True, padx=(8, 0)
             )
+            return row
 
         # ── Header ───────────────────────────────────────────────────────
         hdr = ctk.CTkFrame(self.root, corner_radius=0, fg_color=HDR)
@@ -1357,9 +1358,32 @@ class TrailCamGUI:
             text_color="#3a6050",
         ).pack(side="left", pady=(3, 0))
 
+        # ── Tabbed body + persistent run bar ─────────────────────────────
+        # The run bar is packed first against the bottom so it stays pinned;
+        # the tabview then fills the remaining space above it.
+        run_bar = ctk.CTkFrame(self.root, fg_color=BG)
+        run_bar.pack(side="bottom", fill="x")
+
+        self.tabs = ctk.CTkTabview(
+            self.root, fg_color=BG,
+            segmented_button_fg_color=CARD,
+            segmented_button_selected_color=GREEN,
+            segmented_button_selected_hover_color=GREEN_H,
+            segmented_button_unselected_color=CARD,
+            segmented_button_unselected_hover_color=CLOSE_H,
+            text_color=TEXT,
+        )
+        self.tabs.pack(side="top", fill="both", expand=True, padx=8, pady=(6, 0))
+        self.tabs.add("Setup")
+        self.tabs.add("Run & Log")
+        # Setup content scrolls so advanced mode can never overflow its tab.
+        setup_tab = ctk.CTkScrollableFrame(self.tabs.tab("Setup"), fg_color="transparent")
+        setup_tab.pack(fill="both", expand=True)
+        runlog_tab = self.tabs.tab("Run & Log")
+
         # ── Folders ──────────────────────────────────────────────────────
-        section_header("INPUT / OUTPUT")
-        folders = ctk.CTkFrame(self.root, fg_color=CARD, corner_radius=8)
+        section_header("INPUT / OUTPUT", setup_tab)
+        folders = ctk.CTkFrame(setup_tab, fg_color=CARD, corner_radius=8)
         folders.pack(fill="x", padx=16, pady=(6, 0))
         folders.columnconfigure(1, weight=1)
 
@@ -1401,8 +1425,8 @@ class TrailCamGUI:
         ).grid(row=1, column=2, padx=(4, 16), pady=(6, 16))
 
         # ── Options ──────────────────────────────────────────────────────
-        section_header("OPTIONS")
-        opts = ctk.CTkFrame(self.root, fg_color=CARD, corner_radius=8)
+        section_header("OPTIONS", setup_tab)
+        opts = ctk.CTkFrame(setup_tab, fg_color=CARD, corner_radius=8)
         opts.pack(fill="x", padx=16, pady=(6, 0))
 
         mode_row = ctk.CTkFrame(opts, fg_color="transparent")
@@ -1570,10 +1594,9 @@ class TrailCamGUI:
         # Sync region combo enabled-state to the restored country.
         self._on_country_change(self._settings["country"])
 
-        # ── Run controls ─────────────────────────────────────────────────
-        section_header("RUN")
-        run_card = ctk.CTkFrame(self.root, fg_color=CARD, corner_radius=8)
-        run_card.pack(fill="x", padx=16, pady=(6, 0))
+        # ── Run controls (persistent bar, visible from both tabs) ────────
+        run_card = ctk.CTkFrame(run_bar, fg_color=CARD, corner_radius=8)
+        run_card.pack(fill="x", padx=16, pady=(8, 10))
 
         btn_row = ctk.CTkFrame(run_card, fg_color="transparent")
         btn_row.pack(fill="x", padx=14, pady=(14, 8))
@@ -1628,7 +1651,7 @@ class TrailCamGUI:
         self.status_label.pack(anchor="w", padx=14, pady=(2, 12))
 
         # ── Summary card (populated on completion) ───────────────────────
-        self.summary_card = ctk.CTkFrame(run_card, fg_color=INNER, corner_radius=8)
+        self.summary_card = ctk.CTkFrame(runlog_tab, fg_color=INNER, corner_radius=8)
         # Not packed yet; _render_summary packs it when there is something to show.
 
         self.summary_banner = ctk.CTkLabel(
@@ -1662,9 +1685,9 @@ class TrailCamGUI:
         self.summary_meta.pack(fill="x", padx=12, pady=(0, 10))
 
         # ── Activity log ─────────────────────────────────────────────────
-        section_header("ACTIVITY LOG")
+        self._log_header_row = section_header("ACTIVITY LOG", runlog_tab)
         self.log_box = ctk.CTkTextbox(
-            self.root,
+            runlog_tab,
             height=140,
             font=ctk.CTkFont(family="Consolas", size=11),
             fg_color=CARD,
@@ -1782,7 +1805,7 @@ class TrailCamGUI:
             self.summary_body.configure(text="")
             self.summary_meta.configure(text="")
             self.open_folder_btn.configure(state="disabled")
-            self.summary_card.pack(fill="x", padx=14, pady=(0, 12))
+            self.summary_card.pack(fill="x", padx=16, pady=(6, 10), before=self._log_header_row)
             from tkinter import messagebox
             messagebox.showerror("Sort failed", msg, parent=self.root)
             return
@@ -1813,7 +1836,7 @@ class TrailCamGUI:
 
         # A dry run writes nothing, so there is no output to open.
         self.open_folder_btn.configure(state="disabled" if s["banner"] is not None else "normal")
-        self.summary_card.pack(fill="x", padx=14, pady=(0, 12))
+        self.summary_card.pack(fill="x", padx=16, pady=(6, 10), before=self._log_header_row)
 
     def _open_folder(self):
         path = getattr(self, "_summary_output", None)
@@ -1895,6 +1918,7 @@ class TrailCamGUI:
         self.run_btn.configure(state="disabled", text="Running…")
         self.cancel_btn.configure(state="normal", text="Cancel")
         self.close_btn.configure(state="disabled")
+        self.tabs.set("Run & Log")  # surface the streaming log + results
         self._running = True
         self.root.after(100, self._poll)
 
