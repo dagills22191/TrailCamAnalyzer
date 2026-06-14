@@ -44,7 +44,7 @@ from typing import Callable, Literal, Optional
 # Constants
 # ---------------------------------------------------------------------------
 
-__version__ = "1.1.1"
+__version__ = "1.2.0"
 
 # Amber accent used to signal a pending cancel (progress bar + status text).
 WARN_AMBER = "#d4912f"
