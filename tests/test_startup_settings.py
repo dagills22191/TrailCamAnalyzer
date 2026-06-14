@@ -10,7 +10,7 @@ def test_empty_config_yields_defaults():
     s = resolve_startup_settings({})
     assert s["last_source"] == ""
     assert s["last_output"] == str(Path.home() / "TrailCamAnimals")
-    assert s["advanced_mode"] is False
+    assert "advanced_mode" not in s
     assert s["recursive"] is True
     assert s["country"] == ""
     assert s["region"] == ""
@@ -26,7 +26,6 @@ def test_persisted_values_restored():
     cfg = {
         "last_source": r"D:\Cam\June",
         "last_output": r"D:\Sorted",
-        "advanced_mode": True,
         "recursive": False,
         "country": "USA",
         "region": "Michigan",
@@ -38,7 +37,6 @@ def test_persisted_values_restored():
     s = resolve_startup_settings(cfg)
     assert s["last_source"] == r"D:\Cam\June"
     assert s["last_output"] == r"D:\Sorted"
-    assert s["advanced_mode"] is True
     assert s["recursive"] is False
     assert s["country"] == "USA"
     assert s["region"] == "Michigan"
@@ -75,6 +73,6 @@ def test_region_kept_when_country_usa():
 
 def test_corrupt_boolean_coerced():
     # A hand-edited or legacy config may store booleans as strings/ints.
-    s = resolve_startup_settings({"advanced_mode": 1, "recursive": 0})
-    assert s["advanced_mode"] is True
+    s = resolve_startup_settings({"species_subfolders": 0, "recursive": 0})
+    assert s["species_subfolders"] is False
     assert s["recursive"] is False

@@ -148,7 +148,6 @@ def resolve_startup_settings(config: dict) -> dict:
         "last_source": str(config.get("last_source", "") or ""),
         "last_output": str(config.get("last_output")
                            or (Path.home() / "TrailCamAnimals")),
-        "advanced_mode": _as_bool(config.get("advanced_mode"), False),
         "recursive": _as_bool(config.get("recursive"), True),
         "country": country,
         "region": region,
@@ -1289,6 +1288,65 @@ class _QueueHandler(logging.Handler):
         self.q.put(("log", self.format(record)))
 
 
+class _Tooltip:
+    """Lightweight hover tooltip for a Tk/CTk widget — no external dependency.
+
+    Shows a borderless popup after a short delay when the cursor enters the
+    widget; hides it on leave or click. Colours mirror the _build_ui palette
+    (INNER / TEXT / SEP).
+    """
+
+    def __init__(self, widget, text: str, *, delay: int = 400, wraplength: int = 260,
+                 bg: str = "#232f40", fg: str = "#c8d8e8", border: str = "#2a3a4a"):
+        self.widget = widget
+        self.text = text
+        self.delay = delay
+        self.wraplength = wraplength
+        self.bg = bg
+        self.fg = fg
+        self.border = border
+        self._after_id = None
+        self._tip = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _event=None):
+        self._cancel()
+        self._after_id = self.widget.after(self.delay, self._show)
+
+    def _cancel(self):
+        if self._after_id is not None:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+
+    def _show(self):
+        if self._tip is not None or not self.text:
+            return
+        import tkinter as tk
+        x = self.widget.winfo_rootx() + 12
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        self._tip = tk.Toplevel(self.widget)
+        self._tip.wm_overrideredirect(True)
+        self._tip.wm_geometry(f"+{x}+{y}")
+        tk.Label(
+            self._tip, text=self.text, justify="left",
+            bg=self.bg, fg=self.fg, wraplength=self.wraplength,
+            font=("Segoe UI", 9), bd=0, relief="flat",
+            highlightbackground=self.border, highlightthickness=1,
+            padx=8, pady=5,
+        ).pack()
+
+    def _hide(self, _event=None):
+        self._cancel()
+        if self._tip is not None:
+            self._tip.destroy()
+            self._tip = None
+
+
 class TrailCamGUI:
     def __init__(self):
         import customtkinter as ctk
@@ -1439,49 +1497,52 @@ class TrailCamGUI:
         opts = ctk.CTkFrame(setup_tab, fg_color=CARD, corner_radius=8)
         opts.pack(fill="x", padx=16, pady=(6, 0))
 
-        mode_row = ctk.CTkFrame(opts, fg_color="transparent")
-        mode_row.pack(fill="x", padx=16, pady=(12, 4))
-
-        self.advanced_mode_var = ctk.BooleanVar(value=self._settings["advanced_mode"])
-        ctk.CTkCheckBox(
-            mode_row,
-            text="Advanced mode",
-            variable=self.advanced_mode_var,
-            fg_color=GREEN,
-            hover_color=GREEN_H,
-            checkmark_color="white",
-            command=self._on_advanced_mode_toggle,
-        ).pack(side="left")
-
-        self.mode_hint_label = ctk.CTkLabel(
-            mode_row,
-            text="Basic mode shows common options. Enable advanced mode for expert controls.",
-            font=ctk.CTkFont(size=10),
-            text_color=MUTED,
-            anchor="w",
-        )
-        self.mode_hint_label.pack(side="left", padx=(12, 0))
+        def tip(widget, text):
+            _Tooltip(widget, text, bg=INNER, fg=TEXT, border=SEP)
+            return widget
 
         basic_row = ctk.CTkFrame(opts, fg_color="transparent")
-        basic_row.pack(fill="x", padx=16, pady=(6, 8))
+        basic_row.pack(fill="x", padx=16, pady=(12, 8))
 
         self.recursive_var = ctk.BooleanVar(value=self._settings["recursive"])
-        ctk.CTkCheckBox(
+        tip(ctk.CTkCheckBox(
             basic_row, text="Scan subfolders", variable=self.recursive_var,
             fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
-        ).pack(side="left", padx=(0, 22))
+        ), "Also search inside subfolders of the source folder, not just the top level.").pack(side="left", padx=(0, 22))
 
         self.move_var = ctk.BooleanVar(value=self._settings["move"])
-        ctk.CTkCheckBox(
+        tip(ctk.CTkCheckBox(
             basic_row, text="Move files", variable=self.move_var,
             fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
-        ).pack(side="left", padx=(0, 22))
+        ), "Move originals into the output folder instead of copying. Off = copies are made, originals left untouched.").pack(side="left", padx=(0, 22))
 
         self.dry_var = ctk.BooleanVar(value=self._settings["dry_run"])
-        ctk.CTkCheckBox(
+        tip(ctk.CTkCheckBox(
             basic_row, text="Dry run", variable=self.dry_var,
             fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
-        ).pack(side="left", padx=(0, 22))
+        ), "Preview what would happen — no files are moved or copied.").pack(side="left", padx=(0, 22))
+
+        # Output/event-handling toggles (previously behind 'Advanced mode').
+        chk_row = ctk.CTkFrame(opts, fg_color="transparent")
+        chk_row.pack(fill="x", padx=16, pady=(0, 8))
+
+        self.subfolders_var = ctk.BooleanVar(value=self._settings["species_subfolders"])
+        tip(ctk.CTkCheckBox(
+            chk_row, text="Species subfolders", variable=self.subfolders_var,
+            fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
+        ), "Create one subfolder per species in the output folder. Off = all sorted files go in a single folder.").pack(side="left", padx=(0, 22))
+
+        self.sharpness_var = ctk.BooleanVar(value=self._settings["sharpness"])
+        tip(ctk.CTkCheckBox(
+            chk_row, text="Pick sharpest frame", variable=self.sharpness_var,
+            fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
+        ), "When an event has several frames, keep only the sharpest. Requires OpenCV.").pack(side="left", padx=(0, 22))
+
+        self.exif_var = ctk.BooleanVar(value=self._settings["exif_fallback"])
+        tip(ctk.CTkCheckBox(
+            chk_row, text="EXIF/modified-time fallback", variable=self.exif_var,
+            fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
+        ), "When a filename has no timestamp, use EXIF data or the file's modified time to group events. Recommended.").pack(side="left")
 
         basic_geo_row = ctk.CTkFrame(opts, fg_color="transparent")
         basic_geo_row.pack(fill="x", padx=16, pady=(0, 6))
@@ -1508,6 +1569,8 @@ class TrailCamGUI:
             command=self._on_country_change,
         )
         self.country_combo.pack(side="left", padx=(0, 20))
+        tip(self.country_combo,
+            "Restrict species predictions to those plausible for this location. Region applies to the USA only.")
 
         ctk.CTkLabel(
             basic_geo_row,
@@ -1531,6 +1594,8 @@ class TrailCamGUI:
             dropdown_text_color=TEXT,
         )
         self.region_combo.pack(side="left", padx=(0, 28))
+        tip(self.region_combo,
+            "US state to refine geofencing. Only used when Country is USA.")
 
         ctk.CTkLabel(
             basic_geo_row,
@@ -1539,7 +1604,7 @@ class TrailCamGUI:
             text_color=DIM,
         ).pack(side="left", padx=(0, 8))
         self.conf_var = ctk.DoubleVar(value=self._settings["confidence"])
-        ctk.CTkSlider(
+        conf_slider = ctk.CTkSlider(
             basic_geo_row,
             from_=0.1,
             to=0.9,
@@ -1551,7 +1616,11 @@ class TrailCamGUI:
             progress_color=GREEN,
             fg_color=INNER,
             command=lambda v: self.conf_label.configure(text=f"{float(v):.2f}"),
-        ).pack(side="left")
+        )
+        conf_slider.pack(side="left")
+        tip(conf_slider,
+            "Minimum certainty to file a detection under a species. "
+            "Lower = more results but more mistakes; higher = fewer, surer results.")
         self.conf_label = ctk.CTkLabel(
             basic_geo_row,
             text=f"{self._settings['confidence']:.2f}",
@@ -1562,45 +1631,13 @@ class TrailCamGUI:
         self.conf_label.pack(side="left", padx=(6, 18))
 
         ctk.CTkLabel(
-            basic_geo_row,
+            opts,
             text="Geofencing optional · Region applies to USA only · lower confidence = more results",
             font=ctk.CTkFont(size=10),
             text_color=MUTED,
-        ).pack(side="left")
+            anchor="w",
+        ).pack(fill="x", anchor="w", padx=16, pady=(0, 6))
 
-        self.advanced_frame = ctk.CTkFrame(opts, fg_color="transparent")
-        self.advanced_frame.pack(fill="x", padx=0, pady=(0, 10))
-
-        ctk.CTkLabel(
-            self.advanced_frame,
-            text="Advanced options for output layout and event handling.",
-            font=ctk.CTkFont(size=10), text_color=MUTED, anchor="w",
-        ).pack(fill="x", padx=16, pady=(2, 8))
-
-        ctk.CTkFrame(self.advanced_frame, height=1, fg_color=SEP).pack(fill="x", padx=12, pady=(0, 10))
-
-        chk_row = ctk.CTkFrame(self.advanced_frame, fg_color="transparent")
-        chk_row.pack(fill="x", padx=16, pady=(0, 14))
-
-        self.subfolders_var = ctk.BooleanVar(value=self._settings["species_subfolders"])
-        ctk.CTkCheckBox(
-            chk_row, text="Species subfolders", variable=self.subfolders_var,
-            fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
-        ).pack(side="left", padx=(0, 22))
-
-        self.sharpness_var = ctk.BooleanVar(value=self._settings["sharpness"])
-        ctk.CTkCheckBox(
-            chk_row, text="Pick sharpest frame", variable=self.sharpness_var,
-            fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
-        ).pack(side="left")
-
-        self.exif_var = ctk.BooleanVar(value=self._settings["exif_fallback"])
-        ctk.CTkCheckBox(
-            chk_row, text="Use EXIF/modified-time fallback (recommended)", variable=self.exif_var,
-            fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
-        ).pack(side="left", padx=(22, 0))
-
-        self._set_advanced_mode(self._settings["advanced_mode"])
         # Sync region combo enabled-state to the restored country.
         self._on_country_change(self._settings["country"])
 
@@ -1714,21 +1751,6 @@ class TrailCamGUI:
         else:
             self.region_var.set("")
             self.region_combo.configure(state="disabled")
-
-    def _set_advanced_mode(self, enabled: bool):
-        if enabled:
-            self.advanced_frame.pack(fill="x", padx=0, pady=(0, 10))
-            self.mode_hint_label.configure(
-                text="Advanced mode enabled: expert controls are visible."
-            )
-        else:
-            self.advanced_frame.pack_forget()
-            self.mode_hint_label.configure(
-                text="Basic mode shows common options, including geofencing and confidence. Enable advanced mode for expert controls."
-            )
-
-    def _on_advanced_mode_toggle(self):
-        self._set_advanced_mode(self.advanced_mode_var.get())
 
     def _browse(self, var, title: str):
         from tkinter import filedialog
@@ -1874,7 +1896,6 @@ class TrailCamGUI:
         return {
             "last_source": self.src_var.get().strip(),
             "last_output": self.out_var.get().strip(),
-            "advanced_mode": self.advanced_mode_var.get(),
             "recursive": self.recursive_var.get(),
             "country": self.country_var.get().strip(),
             "region": self.region_var.get().strip(),
