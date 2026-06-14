@@ -162,6 +162,16 @@ def resolve_startup_settings(config: dict) -> dict:
     }
 
 
+def display_path(p: str) -> str:
+    """Normalize a path string to native separators for display in the GUI.
+
+    The file dialog returns forward slashes on Windows while config-derived
+    defaults use backslashes; normalizing keeps the Source/Output fields
+    consistent. Empty strings pass through unchanged.
+    """
+    return os.path.normpath(p) if p else p
+
+
 def load_checkpoint(checkpoint_path: Path) -> set[str]:
     """Load completed event keys from a checkpoint file."""
     if not checkpoint_path.is_file():
@@ -1392,7 +1402,7 @@ class TrailCamGUI:
             font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
             text_color=DIM, width=64, anchor="w",
         ).grid(row=0, column=0, padx=(16, 6), pady=(16, 6), sticky="w")
-        self.src_var = ctk.StringVar(value=self._settings["last_source"])
+        self.src_var = ctk.StringVar(value=display_path(self._settings["last_source"]))
         ctk.CTkEntry(
             folders, textvariable=self.src_var,
             placeholder_text="Select the folder containing trail-cam files…",
@@ -1411,7 +1421,7 @@ class TrailCamGUI:
             font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
             text_color=DIM, width=64, anchor="w",
         ).grid(row=1, column=0, padx=(16, 6), pady=(6, 16), sticky="w")
-        self.out_var = ctk.StringVar(value=self._settings["last_output"])
+        self.out_var = ctk.StringVar(value=display_path(self._settings["last_output"]))
         ctk.CTkEntry(
             folders, textvariable=self.out_var,
             fg_color=INNER, border_color=SEP, border_width=1,
@@ -1724,7 +1734,7 @@ class TrailCamGUI:
         from tkinter import filedialog
         folder = filedialog.askdirectory(title=title, parent=self.root)
         if folder:
-            var.set(folder)
+            var.set(display_path(folder))
 
     def _set_progress(self, value: float):
         self._busy = False
