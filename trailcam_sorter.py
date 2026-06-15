@@ -566,6 +566,38 @@ def load_model(log: logging.Logger):
     return model
 
 
+# Labels that are not wildlife and should never be the "flash" preview image.
+_PREVIEW_NON_WILDLIFE = {
+    "blank", "unknown", "animal", "no cv result", "human", "person", "vehicle",
+}
+
+
+def select_preview_candidate(predictions: list[dict], min_confidence: float) -> Optional[dict]:
+    """Return the highest-confidence wildlife prediction in a batch for the live
+    preview, or None if the batch has no confident animal.
+
+    Mirrors the sort path's notion of a real species: skips blank, unknown, the
+    generic 'animal'/'no cv result' labels, and (preview-only) human/vehicle, and
+    requires prediction_score >= min_confidence. Ties resolve to the first seen.
+    """
+    best = None
+    best_score = -1.0
+    for pred in predictions:
+        label = pred.get("prediction", "") or ""
+        score = pred.get("prediction_score", 0.0) or 0.0
+        if score < min_confidence:
+            continue
+        if "unknown" in label.lower():
+            continue
+        name = sanitize_label(label).lower() if label else ""
+        if not name or name in _PREVIEW_NON_WILDLIFE:
+            continue
+        if score > best_score:
+            best = pred
+            best_score = score
+    return best
+
+
 def classify_images(
     model,
     image_paths: list[Path],
