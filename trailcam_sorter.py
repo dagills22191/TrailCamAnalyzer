@@ -189,6 +189,10 @@ def resolve_startup_settings(config: dict) -> dict:
     if country != "USA":
         region = ""
 
+    theme = str(config.get("theme", "dark")).lower()
+    if theme not in ("light", "dark"):
+        theme = "dark"
+
     return {
         "last_source": str(config.get("last_source", "") or ""),
         "last_output": str(config.get("last_output")
@@ -197,6 +201,7 @@ def resolve_startup_settings(config: dict) -> dict:
         "country": country,
         "region": region,
         "confidence": confidence,
+        "theme": theme,
         "species_subfolders": _as_bool(config.get("species_subfolders"), True),
         "sharpness": _as_bool(config.get("sharpness"), False),
         "exif_fallback": _as_bool(config.get("exif_fallback"), True),
