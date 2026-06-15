@@ -2181,7 +2181,16 @@ class TrailCamGUI:
         self.run_btn.configure(state="disabled", text="Running…")
         self.cancel_btn.configure(state="normal", text="Cancel")
         self.close_btn.configure(state="disabled")
-        self.tabs.set("Run & Log")  # surface the streaming log + results
+        # Reset live-preview state for this run.
+        self._preview_shown = False
+        self._user_switched_tabs = False
+        self._preview_ctkimage = None
+        self.preview_image_label.configure(
+            image=self._blank_preview_img, text="Waiting for the first confident ID…"
+        )
+        self.preview_species_label.configure(text="")
+        self.preview_meta_label.configure(text="")
+        self.tabs.set("Log")  # streaming log covers model load + first batch
         self._running = True
         self.root.after(100, self._poll)
 
@@ -2216,6 +2225,7 @@ class TrailCamGUI:
                     event_window_seconds=0,
                     report_csv=None,
                     progress_callback=lambda v: self._q.put(("progress", v)),
+                    preview_callback=self._on_preview_candidate,
                     status_callback=lambda s: self._q.put(("status", s)),
                     cancel_event=self._cancel_event,
                 )
