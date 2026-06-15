@@ -1791,6 +1791,7 @@ class TrailCamGUI:
             btn_row, text="▶  Run Sort", height=44,
             font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
             fg_color=GREEN, hover_color=GREEN_H, text_color=THEME["on_accent"],
+            text_color_disabled=THEME["on_accent"],
             command=self._on_run,
         )
         self.run_btn.grid(row=0, column=0, sticky="ew", padx=(0, 8))
@@ -1853,6 +1854,7 @@ class TrailCamGUI:
         self.open_folder_btn = ctk.CTkButton(
             header_row, text="Open folder", height=28, width=110,
             fg_color=GREEN, hover_color=GREEN_H, text_color=THEME["on_accent"],
+            text_color_disabled=THEME["on_accent"],
             font=ctk.CTkFont(size=12), command=self._open_folder,
         )
         self.open_folder_btn.pack(side="right")
