@@ -1449,7 +1449,11 @@ class TrailCamGUI:
         self._pending_error = None
 
         def section_header(text: str, parent=None):
-            row = ctk.CTkFrame(parent if parent is not None else self.root, fg_color="transparent")
+            # Explicit themed bg (not "transparent"): transparent children of a
+            # CTkScrollableFrame don't re-resolve their inherited color on a live
+            # set_appearance_mode, so they'd stay dark after a toggle. BG matches
+            # the scrollable/tab background, so the row blends in either mode.
+            row = ctk.CTkFrame(parent if parent is not None else self.root, fg_color=BG)
             row.pack(fill="x", padx=16, pady=(10, 0))
             ctk.CTkLabel(
                 row, text=text,
