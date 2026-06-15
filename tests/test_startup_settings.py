@@ -76,3 +76,20 @@ def test_corrupt_boolean_coerced():
     s = resolve_startup_settings({"species_subfolders": 0, "recursive": 0})
     assert s["species_subfolders"] is False
     assert s["recursive"] is False
+
+
+def test_theme_defaults_to_dark_when_absent():
+    assert resolve_startup_settings({})["theme"] == "dark"
+
+
+def test_theme_light_is_restored():
+    assert resolve_startup_settings({"theme": "light"})["theme"] == "light"
+
+
+def test_theme_dark_is_restored():
+    assert resolve_startup_settings({"theme": "dark"})["theme"] == "dark"
+
+
+def test_theme_unknown_value_falls_back_to_dark():
+    assert resolve_startup_settings({"theme": "rainbow"})["theme"] == "dark"
+    assert resolve_startup_settings({"theme": 123})["theme"] == "dark"

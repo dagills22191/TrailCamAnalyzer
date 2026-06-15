@@ -47,9 +47,54 @@ from typing import Callable, Literal, Optional
 __version__ = "1.2.0"
 
 # Amber accent used to signal a pending cancel (progress bar + status text).
-WARN_AMBER = "#d4912f"
+# Status accents, as (light, dark) so they re-theme with appearance mode.
+WARN_AMBER = ("#b8791f", "#d4912f")
 # Red accent used for the error banner on the summary card.
-ERROR_RED = "#c0392b"
+ERROR_RED = ("#b23b3b", "#c0392b")
+
+# ---------------------------------------------------------------------------
+# Theme — every color is a (light, dark) tuple. CustomTkinter resolves these
+# against the active appearance mode and re-resolves all CTk widgets live when
+# ctk.set_appearance_mode() is called, so the light/dark toggle needs no
+# per-widget bookkeeping. Raw-tk widgets (the tooltip) use _resolve_mode_color.
+# ---------------------------------------------------------------------------
+THEME = {
+    # role:          (light,      dark)
+    "bg":           ("#f4f6f9",  "#0f1115"),
+    "surface":      ("#fbfcfe",  "#15181f"),
+    "input":        ("#ffffff",  "#1f232d"),
+    "border":       ("#e2e6ee",  "#232733"),
+    "accent":       ("#16a34a",  "#4ade80"),
+    "accent_hi":    ("#15803d",  "#37c46f"),
+    "text":         ("#1c2230",  "#e6e9ef"),
+    "dim":          ("#5a6675",  "#8a93a3"),
+    "muted":        ("#8a93a3",  "#5b6675"),
+    "cancel":       ("#b23b3b",  "#7a2222"),
+    "cancel_hi":    ("#922f2f",  "#5a1818"),
+    "close_hi":     ("#e8ecf3",  "#2d3d50"),
+    "header":       ("#ffffff",  "#0f1115"),
+    "header_title": ("#15803d",  "#c8e8d0"),
+    "header_sub":   ("#6b8a72",  "#3a6050"),
+    "log_text":     ("#16a34a",  "#6aab85"),
+    "warn":         WARN_AMBER,
+    "error":        ERROR_RED,
+}
+
+
+def _resolve_mode_color(value, mode=None):
+    """Pick the matching element of a (light, dark) tuple for raw-tk widgets.
+
+    CTk widgets resolve tuples themselves; raw tkinter (the tooltip) cannot, so
+    it calls this with the current ctk.get_appearance_mode(). Plain strings are
+    mode-independent and returned unchanged.
+    """
+    if isinstance(value, (tuple, list)) and len(value) == 2:
+        if mode is None:
+            import customtkinter as ctk
+            mode = ctk.get_appearance_mode()
+        return value[0] if str(mode).lower() == "light" else value[1]
+    return value
+
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 
@@ -144,6 +189,10 @@ def resolve_startup_settings(config: dict) -> dict:
     if country != "USA":
         region = ""
 
+    theme = str(config.get("theme", "dark")).lower()
+    if theme not in ("light", "dark"):
+        theme = "dark"
+
     return {
         "last_source": str(config.get("last_source", "") or ""),
         "last_output": str(config.get("last_output")
@@ -152,6 +201,7 @@ def resolve_startup_settings(config: dict) -> dict:
         "country": country,
         "region": region,
         "confidence": confidence,
+        "theme": theme,
         "species_subfolders": _as_bool(config.get("species_subfolders"), True),
         "sharpness": _as_bool(config.get("sharpness"), False),
         "exif_fallback": _as_bool(config.get("exif_fallback"), True),
@@ -1297,7 +1347,7 @@ class _Tooltip:
     """
 
     def __init__(self, widget, text: str, *, delay: int = 400, wraplength: int = 260,
-                 bg: str = "#232f40", fg: str = "#c8d8e8", border: str = "#2a3a4a"):
+                 bg=THEME["input"], fg=THEME["text"], border=THEME["border"]):
         self.widget = widget
         self.text = text
         self.delay = delay
@@ -1334,9 +1384,11 @@ class _Tooltip:
         self._tip.wm_geometry(f"+{x}+{y}")
         tk.Label(
             self._tip, text=self.text, justify="left",
-            bg=self.bg, fg=self.fg, wraplength=self.wraplength,
+            bg=_resolve_mode_color(self.bg), fg=_resolve_mode_color(self.fg),
+            wraplength=self.wraplength,
             font=("Segoe UI", 9), bd=0, relief="flat",
-            highlightbackground=self.border, highlightthickness=1,
+            highlightbackground=_resolve_mode_color(self.border),
+            highlightthickness=1,
             padx=8, pady=5,
         ).pack()
 
@@ -1352,7 +1404,8 @@ class TrailCamGUI:
         import customtkinter as ctk
         self.ctk = ctk
 
-        ctk.set_appearance_mode("dark")
+        self._theme_mode = resolve_startup_settings(load_config())["theme"]
+        ctk.set_appearance_mode(self._theme_mode)
         ctk.set_default_color_theme("blue")
 
         self.root = ctk.CTk()
@@ -1360,7 +1413,7 @@ class TrailCamGUI:
         self.root.geometry("820x720")
         self.root.resizable(True, True)
         self.root.minsize(680, 500)
-        self.root.configure(fg_color="#161c24")
+        self.root.configure(fg_color=THEME["bg"])
 
         self._q: queue.Queue = queue.Queue()
         self._running = False
@@ -1375,19 +1428,19 @@ class TrailCamGUI:
         ctk = self.ctk
         self._settings = resolve_startup_settings(load_config())
 
-        BG       = "#161c24"
-        CARD     = "#1e2736"
-        INNER    = "#232f40"
-        HDR      = "#0d1a10"
-        GREEN    = "#2d7d52"
-        GREEN_H  = "#37965f"
-        CANCEL   = "#7a2222"
-        CANCEL_H = "#5a1818"
-        CLOSE_H  = "#2d3d50"
-        TEXT     = "#c8d8e8"
-        DIM      = "#6a8090"
-        MUTED    = "#4a6070"
-        SEP      = "#2a3a4a"
+        BG       = THEME["bg"]
+        CARD     = THEME["surface"]
+        INNER    = THEME["input"]
+        HDR      = THEME["header"]
+        GREEN    = THEME["accent"]
+        GREEN_H  = THEME["accent_hi"]
+        CANCEL   = THEME["cancel"]
+        CANCEL_H = THEME["cancel_hi"]
+        CLOSE_H  = THEME["close_hi"]
+        TEXT     = THEME["text"]
+        DIM      = THEME["dim"]
+        MUTED    = THEME["muted"]
+        SEP      = THEME["border"]
         # Defaults reused outside _build_ui (e.g. resetting after a pending cancel).
         self._progress_color = GREEN
         self._status_color = DIM
@@ -1396,7 +1449,11 @@ class TrailCamGUI:
         self._pending_error = None
 
         def section_header(text: str, parent=None):
-            row = ctk.CTkFrame(parent if parent is not None else self.root, fg_color="transparent")
+            # Explicit themed bg (not "transparent"): transparent children of a
+            # CTkScrollableFrame don't re-resolve their inherited color on a live
+            # set_appearance_mode, so they'd stay dark after a toggle. BG matches
+            # the scrollable/tab background, so the row blends in either mode.
+            row = ctk.CTkFrame(parent if parent is not None else self.root, fg_color=BG)
             row.pack(fill="x", padx=16, pady=(10, 0))
             ctk.CTkLabel(
                 row, text=text,
@@ -1417,14 +1474,26 @@ class TrailCamGUI:
             hdr_inner,
             text="TrailCam Sorter",
             font=ctk.CTkFont(family="Segoe UI", size=22, weight="bold"),
-            text_color="#c8e8d0",
+            text_color=THEME["header_title"],
         ).pack(side="left")
         ctk.CTkLabel(
             hdr_inner,
             text="  ·  AI-powered species identification via Google SpeciesNet",
             font=ctk.CTkFont(family="Segoe UI", size=11),
-            text_color="#3a6050",
+            text_color=THEME["header_sub"],
         ).pack(side="left", pady=(3, 0))
+
+        # Sun/moon theme toggle — top-right of the header strip (CTk cannot put
+        # widgets in the OS title bar). Glyph reflects the current mode.
+        self.theme_btn = ctk.CTkButton(
+            hdr_inner, text=("🌙" if self._theme_mode == "dark" else "☀"),
+            width=36, height=28,
+            fg_color=INNER, hover_color=CLOSE_H, text_color=TEXT,
+            border_width=1, border_color=SEP,
+            font=ctk.CTkFont(size=15),
+            command=self._on_toggle_theme,
+        )
+        self.theme_btn.pack(side="right")
 
         # ── Tabbed body + persistent run bar ─────────────────────────────
         # The run bar is packed first against the bottom so it stays pinned;
@@ -1498,7 +1567,9 @@ class TrailCamGUI:
         opts.pack(fill="x", padx=16, pady=(6, 0))
 
         def tip(widget, text):
-            _Tooltip(widget, text, bg=INNER, fg=TEXT, border=SEP)
+            # _Tooltip defaults to themed (light, dark) roles and resolves them
+            # against the active mode each time it is shown.
+            _Tooltip(widget, text)
             return widget
 
         basic_row = ctk.CTkFrame(opts, fg_color="transparent")
@@ -1738,12 +1809,20 @@ class TrailCamGUI:
             height=140,
             font=ctk.CTkFont(family="Consolas", size=11),
             fg_color=CARD,
-            text_color="#6aab85",
+            text_color=THEME["log_text"],
             border_color=SEP, border_width=1,
             scrollbar_button_color=SEP,
             scrollbar_button_hover_color=GREEN,
         )
         self.log_box.pack(fill="both", expand=True, padx=16, pady=(6, 16))
+
+    def _on_toggle_theme(self):
+        """Flip light/dark live and persist the choice. Safe mid-run — it is a
+        pure re-color (CTk re-resolves tuple colors), no rebuild or thread work."""
+        self._theme_mode = "light" if self._theme_mode == "dark" else "dark"
+        self.ctk.set_appearance_mode(self._theme_mode)
+        self.theme_btn.configure(text=("🌙" if self._theme_mode == "dark" else "☀"))
+        save_config({"theme": self._theme_mode})
 
     def _on_country_change(self, value: str):
         if value == "USA":
