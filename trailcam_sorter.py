@@ -44,7 +44,7 @@ from typing import Callable, Literal, Optional
 # Constants
 # ---------------------------------------------------------------------------
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 # Amber accent used to signal a pending cancel (progress bar + status text).
 # Status accents, as (light, dark) so they re-theme with appearance mode.
