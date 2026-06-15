@@ -76,6 +76,14 @@ THEME = {
     "header_title": ("#15803d",  "#c8e8d0"),
     "header_sub":   ("#6b8a72",  "#3a6050"),
     "log_text":     ("#16a34a",  "#6aab85"),
+    # Text that sits ON a filled accent surface (buttons): dark on the bright
+    # dark-mode green, white on the deeper light-mode green.
+    "on_accent":    ("#ffffff",  "#06210f"),
+    # Selected tab fill — a shade that keeps the shared (silvery/dark) tab text
+    # legible in each mode (bright green + dark text in light; forest green +
+    # light text in dark).
+    "tab_selected": ("#4ade80",  "#2d7d52"),
+    "tab_sel_hover":("#37c46f",  "#37965f"),
     "warn":         WARN_AMBER,
     "error":        ERROR_RED,
 }
@@ -1555,8 +1563,8 @@ class TrailCamGUI:
         self.tabs = ctk.CTkTabview(
             self.root, fg_color=BG,
             segmented_button_fg_color=CARD,
-            segmented_button_selected_color=GREEN,
-            segmented_button_selected_hover_color=GREEN_H,
+            segmented_button_selected_color=THEME["tab_selected"],
+            segmented_button_selected_hover_color=THEME["tab_sel_hover"],
             segmented_button_unselected_color=CARD,
             segmented_button_unselected_hover_color=CLOSE_H,
             text_color=TEXT,
@@ -1566,6 +1574,12 @@ class TrailCamGUI:
         self.tabs.add("Setup")
         self.tabs.add("Log")
         self.tabs.add("Preview")
+        # Equal-width tabs: fix the segmented button's total width and turn off
+        # dynamic resizing so its three weight-1 columns split evenly instead of
+        # sizing to each label's length.
+        self.tabs._segmented_button.configure(
+            dynamic_resizing=False, width=330, height=32
+        )
         # Setup content scrolls so advanced mode can never overflow its tab.
         setup_tab = ctk.CTkScrollableFrame(self.tabs.tab("Setup"), fg_color="transparent")
         setup_tab.pack(fill="both", expand=True)
@@ -1776,7 +1790,7 @@ class TrailCamGUI:
         self.run_btn = ctk.CTkButton(
             btn_row, text="▶  Run Sort", height=44,
             font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
-            fg_color=GREEN, hover_color=GREEN_H, text_color="white",
+            fg_color=GREEN, hover_color=GREEN_H, text_color=THEME["on_accent"],
             command=self._on_run,
         )
         self.run_btn.grid(row=0, column=0, sticky="ew", padx=(0, 8))
@@ -1838,7 +1852,7 @@ class TrailCamGUI:
         ).pack(side="left")
         self.open_folder_btn = ctk.CTkButton(
             header_row, text="Open folder", height=28, width=110,
-            fg_color=GREEN, hover_color=GREEN_H,
+            fg_color=GREEN, hover_color=GREEN_H, text_color=THEME["on_accent"],
             font=ctk.CTkFont(size=12), command=self._open_folder,
         )
         self.open_folder_btn.pack(side="right")
