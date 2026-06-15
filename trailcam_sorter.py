@@ -1426,19 +1426,19 @@ class TrailCamGUI:
         ctk = self.ctk
         self._settings = resolve_startup_settings(load_config())
 
-        BG       = "#161c24"
-        CARD     = "#1e2736"
-        INNER    = "#232f40"
-        HDR      = "#0d1a10"
-        GREEN    = "#2d7d52"
-        GREEN_H  = "#37965f"
-        CANCEL   = "#7a2222"
-        CANCEL_H = "#5a1818"
-        CLOSE_H  = "#2d3d50"
-        TEXT     = "#c8d8e8"
-        DIM      = "#6a8090"
-        MUTED    = "#4a6070"
-        SEP      = "#2a3a4a"
+        BG       = THEME["bg"]
+        CARD     = THEME["surface"]
+        INNER    = THEME["input"]
+        HDR      = THEME["header"]
+        GREEN    = THEME["accent"]
+        GREEN_H  = THEME["accent_hi"]
+        CANCEL   = THEME["cancel"]
+        CANCEL_H = THEME["cancel_hi"]
+        CLOSE_H  = THEME["close_hi"]
+        TEXT     = THEME["text"]
+        DIM      = THEME["dim"]
+        MUTED    = THEME["muted"]
+        SEP      = THEME["border"]
         # Defaults reused outside _build_ui (e.g. resetting after a pending cancel).
         self._progress_color = GREEN
         self._status_color = DIM
@@ -1468,13 +1468,13 @@ class TrailCamGUI:
             hdr_inner,
             text="TrailCam Sorter",
             font=ctk.CTkFont(family="Segoe UI", size=22, weight="bold"),
-            text_color="#c8e8d0",
+            text_color=THEME["header_title"],
         ).pack(side="left")
         ctk.CTkLabel(
             hdr_inner,
             text="  ·  AI-powered species identification via Google SpeciesNet",
             font=ctk.CTkFont(family="Segoe UI", size=11),
-            text_color="#3a6050",
+            text_color=THEME["header_sub"],
         ).pack(side="left", pady=(3, 0))
 
         # ── Tabbed body + persistent run bar ─────────────────────────────
@@ -1789,7 +1789,7 @@ class TrailCamGUI:
             height=140,
             font=ctk.CTkFont(family="Consolas", size=11),
             fg_color=CARD,
-            text_color="#6aab85",
+            text_color=THEME["log_text"],
             border_color=SEP, border_width=1,
             scrollbar_button_color=SEP,
             scrollbar_button_hover_color=GREEN,
