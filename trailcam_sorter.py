@@ -1479,6 +1479,18 @@ class TrailCamGUI:
             text_color=THEME["header_sub"],
         ).pack(side="left", pady=(3, 0))
 
+        # Sun/moon theme toggle — top-right of the header strip (CTk cannot put
+        # widgets in the OS title bar). Glyph reflects the current mode.
+        self.theme_btn = ctk.CTkButton(
+            hdr_inner, text=("🌙" if self._theme_mode == "dark" else "☀"),
+            width=36, height=28,
+            fg_color=INNER, hover_color=CLOSE_H, text_color=TEXT,
+            border_width=1, border_color=SEP,
+            font=ctk.CTkFont(size=15),
+            command=self._on_toggle_theme,
+        )
+        self.theme_btn.pack(side="right")
+
         # ── Tabbed body + persistent run bar ─────────────────────────────
         # The run bar is packed first against the bottom so it stays pinned;
         # the tabview then fills the remaining space above it.
@@ -1799,6 +1811,14 @@ class TrailCamGUI:
             scrollbar_button_hover_color=GREEN,
         )
         self.log_box.pack(fill="both", expand=True, padx=16, pady=(6, 16))
+
+    def _on_toggle_theme(self):
+        """Flip light/dark live and persist the choice. Safe mid-run — it is a
+        pure re-color (CTk re-resolves tuple colors), no rebuild or thread work."""
+        self._theme_mode = "light" if self._theme_mode == "dark" else "dark"
+        self.ctk.set_appearance_mode(self._theme_mode)
+        self.theme_btn.configure(text=("🌙" if self._theme_mode == "dark" else "☀"))
+        save_config({"theme": self._theme_mode})
 
     def _on_country_change(self, value: str):
         if value == "USA":
