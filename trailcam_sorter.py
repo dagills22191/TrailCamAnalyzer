@@ -47,9 +47,54 @@ from typing import Callable, Literal, Optional
 __version__ = "1.2.0"
 
 # Amber accent used to signal a pending cancel (progress bar + status text).
-WARN_AMBER = "#d4912f"
+# Status accents, as (light, dark) so they re-theme with appearance mode.
+WARN_AMBER = ("#b8791f", "#d4912f")
 # Red accent used for the error banner on the summary card.
-ERROR_RED = "#c0392b"
+ERROR_RED = ("#b23b3b", "#c0392b")
+
+# ---------------------------------------------------------------------------
+# Theme — every color is a (light, dark) tuple. CustomTkinter resolves these
+# against the active appearance mode and re-resolves all CTk widgets live when
+# ctk.set_appearance_mode() is called, so the light/dark toggle needs no
+# per-widget bookkeeping. Raw-tk widgets (the tooltip) use _resolve_mode_color.
+# ---------------------------------------------------------------------------
+THEME = {
+    # role:          (light,      dark)
+    "bg":           ("#f4f6f9",  "#0f1115"),
+    "surface":      ("#fbfcfe",  "#15181f"),
+    "input":        ("#ffffff",  "#1f232d"),
+    "border":       ("#e2e6ee",  "#232733"),
+    "accent":       ("#16a34a",  "#4ade80"),
+    "accent_hi":    ("#15803d",  "#37c46f"),
+    "text":         ("#1c2230",  "#e6e9ef"),
+    "dim":          ("#5a6675",  "#8a93a3"),
+    "muted":        ("#8a93a3",  "#5b6675"),
+    "cancel":       ("#b23b3b",  "#7a2222"),
+    "cancel_hi":    ("#922f2f",  "#5a1818"),
+    "close_hi":     ("#e8ecf3",  "#2d3d50"),
+    "header":       ("#ffffff",  "#0f1115"),
+    "header_title": ("#15803d",  "#c8e8d0"),
+    "header_sub":   ("#6b8a72",  "#3a6050"),
+    "log_text":     ("#16a34a",  "#6aab85"),
+    "warn":         WARN_AMBER,
+    "error":        ERROR_RED,
+}
+
+
+def _resolve_mode_color(value, mode=None):
+    """Pick the matching element of a (light, dark) tuple for raw-tk widgets.
+
+    CTk widgets resolve tuples themselves; raw tkinter (the tooltip) cannot, so
+    it calls this with the current ctk.get_appearance_mode(). Plain strings are
+    mode-independent and returned unchanged.
+    """
+    if isinstance(value, (tuple, list)) and len(value) == 2:
+        if mode is None:
+            import customtkinter as ctk
+            mode = ctk.get_appearance_mode()
+        return value[0] if str(mode).lower() == "light" else value[1]
+    return value
+
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 
