@@ -1402,7 +1402,8 @@ class TrailCamGUI:
         import customtkinter as ctk
         self.ctk = ctk
 
-        ctk.set_appearance_mode("dark")
+        self._theme_mode = resolve_startup_settings(load_config())["theme"]
+        ctk.set_appearance_mode(self._theme_mode)
         ctk.set_default_color_theme("blue")
 
         self.root = ctk.CTk()
@@ -1410,7 +1411,7 @@ class TrailCamGUI:
         self.root.geometry("820x720")
         self.root.resizable(True, True)
         self.root.minsize(680, 500)
-        self.root.configure(fg_color="#161c24")
+        self.root.configure(fg_color=THEME["bg"])
 
         self._q: queue.Queue = queue.Queue()
         self._running = False
