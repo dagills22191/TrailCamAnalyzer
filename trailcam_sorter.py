@@ -1347,7 +1347,7 @@ class _Tooltip:
     """
 
     def __init__(self, widget, text: str, *, delay: int = 400, wraplength: int = 260,
-                 bg: str = "#232f40", fg: str = "#c8d8e8", border: str = "#2a3a4a"):
+                 bg=THEME["input"], fg=THEME["text"], border=THEME["border"]):
         self.widget = widget
         self.text = text
         self.delay = delay
@@ -1384,9 +1384,11 @@ class _Tooltip:
         self._tip.wm_geometry(f"+{x}+{y}")
         tk.Label(
             self._tip, text=self.text, justify="left",
-            bg=self.bg, fg=self.fg, wraplength=self.wraplength,
+            bg=_resolve_mode_color(self.bg), fg=_resolve_mode_color(self.fg),
+            wraplength=self.wraplength,
             font=("Segoe UI", 9), bd=0, relief="flat",
-            highlightbackground=self.border, highlightthickness=1,
+            highlightbackground=_resolve_mode_color(self.border),
+            highlightthickness=1,
             padx=8, pady=5,
         ).pack()
 
@@ -1549,7 +1551,9 @@ class TrailCamGUI:
         opts.pack(fill="x", padx=16, pady=(6, 0))
 
         def tip(widget, text):
-            _Tooltip(widget, text, bg=INNER, fg=TEXT, border=SEP)
+            # _Tooltip defaults to themed (light, dark) roles and resolves them
+            # against the active mode each time it is shown.
+            _Tooltip(widget, text)
             return widget
 
         basic_row = ctk.CTkFrame(opts, fg_color="transparent")
