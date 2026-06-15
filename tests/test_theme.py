@@ -11,6 +11,7 @@ REQUIRED_ROLES = {
     "bg", "surface", "input", "border", "accent", "accent_hi", "text",
     "dim", "muted", "cancel", "cancel_hi", "close_hi", "header",
     "header_title", "header_sub", "log_text", "warn", "error",
+    "on_accent", "tab_selected", "tab_sel_hover",
 }
 
 

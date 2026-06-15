@@ -76,6 +76,14 @@ THEME = {
     "header_title": ("#15803d",  "#c8e8d0"),
     "header_sub":   ("#6b8a72",  "#3a6050"),
     "log_text":     ("#16a34a",  "#6aab85"),
+    # Text that sits ON a filled accent surface (buttons): dark on the bright
+    # dark-mode green, white on the deeper light-mode green.
+    "on_accent":    ("#ffffff",  "#06210f"),
+    # Selected tab fill — a shade that keeps the shared (silvery/dark) tab text
+    # legible in each mode (bright green + dark text in light; forest green +
+    # light text in dark).
+    "tab_selected": ("#4ade80",  "#2d7d52"),
+    "tab_sel_hover":("#37c46f",  "#37965f"),
     "warn":         WARN_AMBER,
     "error":        ERROR_RED,
 }
@@ -566,6 +574,38 @@ def load_model(log: logging.Logger):
     return model
 
 
+# Labels that are not wildlife and should never be the "flash" preview image.
+_PREVIEW_NON_WILDLIFE = {
+    "blank", "unknown", "animal", "no cv result", "human", "person", "vehicle",
+}
+
+
+def select_preview_candidate(predictions: list[dict], min_confidence: float) -> Optional[dict]:
+    """Return the highest-confidence wildlife prediction in a batch for the live
+    preview, or None if the batch has no confident animal.
+
+    Mirrors the sort path's notion of a real species: skips blank, unknown, the
+    generic 'animal'/'no cv result' labels, and (preview-only) human/vehicle, and
+    requires prediction_score >= min_confidence. Ties resolve to the first seen.
+    """
+    best = None
+    best_score = -1.0
+    for pred in predictions:
+        label = pred.get("prediction", "") or ""
+        score = pred.get("prediction_score", 0.0) or 0.0
+        if score < min_confidence:
+            continue
+        if "unknown" in label.lower():
+            continue
+        name = sanitize_label(label).lower() if label else ""
+        if not name or name in _PREVIEW_NON_WILDLIFE:
+            continue
+        if score > best_score:
+            best = pred
+            best_score = score
+    return best
+
+
 def classify_images(
     model,
     image_paths: list[Path],
@@ -574,6 +614,8 @@ def classify_images(
     log: logging.Logger,
     cancel_event: Optional[threading.Event] = None,
     progress_callback: Optional[Callable[[float], None]] = None,
+    min_confidence: float = 0.0,
+    preview_callback: Optional[Callable[[dict], None]] = None,
 ) -> dict[str, dict]:
     """Run SpeciesNet on representative images in cancellable batches.
 
@@ -598,8 +640,13 @@ def classify_images(
         if region:
             kwargs["admin1_region"] = region
         results = model.predict(**kwargs)
-        for pred in results.get("predictions", []):
+        batch_preds = results.get("predictions", [])
+        for pred in batch_preds:
             lookup[pred["filepath"]] = pred
+        if preview_callback is not None:
+            candidate = select_preview_candidate(batch_preds, min_confidence)
+            if candidate is not None:
+                preview_callback(candidate)
         done += len(chunk)
         if progress_callback:
             progress_callback(done / total if total else 1.0)
@@ -626,6 +673,8 @@ def classify_with_backend(
     log: logging.Logger,
     cancel_event: Optional[threading.Event] = None,
     progress_callback: Optional[Callable[[float], None]] = None,
+    min_confidence: float = 0.0,
+    preview_callback: Optional[Callable[[dict], None]] = None,
 ) -> dict[str, dict]:
     """Dispatch classification to the configured backend implementation."""
     if backend == "speciesnet":
@@ -633,6 +682,8 @@ def classify_with_backend(
             model, image_paths, country, region, log,
             cancel_event=cancel_event,
             progress_callback=progress_callback,
+            min_confidence=min_confidence,
+            preview_callback=preview_callback,
         )
     raise ValueError(f"Unsupported classifier backend: {backend}")
 
@@ -997,6 +1048,7 @@ def run_sort(
     checkpoint_path: Optional[Path] = None,
     resume_from_checkpoint: bool = False,
     progress_callback: Optional[Callable[[float], None]] = None,
+    preview_callback: Optional[Callable[[dict], None]] = None,
     status_callback: Optional[Callable[[str], None]] = None,
     cancel_event: Optional[threading.Event] = None,
 )-> RunResult:
@@ -1193,6 +1245,8 @@ def run_sort(
         log,
         cancel_event=cancel_event,
         progress_callback=_inference_progress,
+        min_confidence=confidence,
+        preview_callback=preview_callback,
     )
     phase_timings["inference"] = time.perf_counter() - inference_start
     if progress_callback:
@@ -1420,6 +1474,11 @@ class TrailCamGUI:
         self._busy = False
         self._anim_tick = 0.0
         self._cancel_event = threading.Event()
+        # Live-preview state (reset each run in _on_run).
+        self._auto_switching = False
+        self._preview_shown = False
+        self._user_switched_tabs = False
+        self._preview_ctkimage = None
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._build_ui()
@@ -1504,19 +1563,27 @@ class TrailCamGUI:
         self.tabs = ctk.CTkTabview(
             self.root, fg_color=BG,
             segmented_button_fg_color=CARD,
-            segmented_button_selected_color=GREEN,
-            segmented_button_selected_hover_color=GREEN_H,
+            segmented_button_selected_color=THEME["tab_selected"],
+            segmented_button_selected_hover_color=THEME["tab_sel_hover"],
             segmented_button_unselected_color=CARD,
             segmented_button_unselected_hover_color=CLOSE_H,
             text_color=TEXT,
+            command=self._on_tab_changed,
         )
         self.tabs.pack(side="top", fill="both", expand=True, padx=8, pady=(6, 0))
         self.tabs.add("Setup")
-        self.tabs.add("Run & Log")
+        self.tabs.add("Log")
+        self.tabs.add("Preview")
+        # Equal-width tabs: fix the segmented button's total width and turn off
+        # dynamic resizing so its three weight-1 columns split evenly instead of
+        # sizing to each label's length.
+        self.tabs._segmented_button.configure(
+            dynamic_resizing=False, width=330, height=32
+        )
         # Setup content scrolls so advanced mode can never overflow its tab.
         setup_tab = ctk.CTkScrollableFrame(self.tabs.tab("Setup"), fg_color="transparent")
         setup_tab.pack(fill="both", expand=True)
-        runlog_tab = self.tabs.tab("Run & Log")
+        runlog_tab = self.tabs.tab("Log")
 
         # ── Folders ──────────────────────────────────────────────────────
         section_header("INPUT / OUTPUT", setup_tab)
@@ -1723,7 +1790,8 @@ class TrailCamGUI:
         self.run_btn = ctk.CTkButton(
             btn_row, text="▶  Run Sort", height=44,
             font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
-            fg_color=GREEN, hover_color=GREEN_H, text_color="white",
+            fg_color=GREEN, hover_color=GREEN_H, text_color=THEME["on_accent"],
+            text_color_disabled=THEME["on_accent"],
             command=self._on_run,
         )
         self.run_btn.grid(row=0, column=0, sticky="ew", padx=(0, 8))
@@ -1785,7 +1853,8 @@ class TrailCamGUI:
         ).pack(side="left")
         self.open_folder_btn = ctk.CTkButton(
             header_row, text="Open folder", height=28, width=110,
-            fg_color=GREEN, hover_color=GREEN_H,
+            fg_color=GREEN, hover_color=GREEN_H, text_color=THEME["on_accent"],
+            text_color_disabled=THEME["on_accent"],
             font=ctk.CTkFont(size=12), command=self._open_folder,
         )
         self.open_folder_btn.pack(side="right")
@@ -1815,6 +1884,32 @@ class TrailCamGUI:
             scrollbar_button_hover_color=GREEN,
         )
         self.log_box.pack(fill="both", expand=True, padx=16, pady=(6, 16))
+
+        # ── Preview tab (live representative ID during a run) ─────────────
+        from PIL import Image as _PILImage
+        preview_tab = self.tabs.tab("Preview")
+        # 1x1 transparent placeholder: configure(image=None) is a no-op in
+        # CTkLabel, so to reliably clear a prior run's photo on reset we swap in
+        # this invisible image (public API, no private-widget access).
+        self._blank_preview_img = ctk.CTkImage(
+            light_image=_PILImage.new("RGBA", (1, 1), (0, 0, 0, 0)),
+            dark_image=_PILImage.new("RGBA", (1, 1), (0, 0, 0, 0)), size=(1, 1),
+        )
+        self.preview_image_label = ctk.CTkLabel(
+            preview_tab, text="Waiting for the first confident ID…",
+            text_color=DIM, font=ctk.CTkFont(family="Segoe UI", size=13),
+        )
+        self.preview_image_label.pack(pady=(28, 12))
+        self.preview_species_label = ctk.CTkLabel(
+            preview_tab, text="",
+            text_color=TEXT, font=ctk.CTkFont(family="Segoe UI", size=18, weight="bold"),
+        )
+        self.preview_species_label.pack()
+        self.preview_meta_label = ctk.CTkLabel(
+            preview_tab, text="",
+            text_color=DIM, font=ctk.CTkFont(family="Segoe UI", size=11),
+        )
+        self.preview_meta_label.pack(pady=(2, 0))
 
     def _on_toggle_theme(self):
         """Flip light/dark live and persist the choice. Safe mid-run — it is a
@@ -1864,6 +1959,8 @@ class TrailCamGUI:
                         self.pct_label.configure(text="")
                 elif kind == "result":
                     self._pending_result = value
+                elif kind == "preview":
+                    self._render_preview(value)
                 elif kind == "error":
                     self._pending_error = value
                 elif kind == "done":
@@ -1957,6 +2054,70 @@ class TrailCamGUI:
         self.open_folder_btn.configure(state="disabled" if s["banner"] is not None else "normal")
         self.summary_card.pack(fill="x", padx=16, pady=(6, 10), before=self._log_header_row)
 
+    def _on_tab_changed(self):
+        """User clicked a tab — record it so we stop auto-switching for the rest
+        of the run. Defensive guard: in current CustomTkinter a programmatic
+        tabs.set() does NOT fire this command (only real clicks do), but the
+        _auto_switching guard keeps us correct even if that ever changes."""
+        if not self._auto_switching:
+            self._user_switched_tabs = True
+
+    def _on_preview_candidate(self, candidate: dict):
+        """Worker-thread callback: decode + caption a representative image and
+        hand it to the UI thread via the queue. Never raises into the run."""
+        try:
+            from PIL import Image
+            path = Path(candidate["filepath"])
+            with Image.open(path) as im:
+                im = im.convert("RGB")
+                max_w = 360
+                if im.width > max_w:
+                    ratio = max_w / im.width
+                    im = im.resize((max_w, max(1, int(im.height * ratio))))
+                else:
+                    im = im.copy()
+            ts = read_exif_datetime(path)
+            if ts is None:
+                try:
+                    ts = datetime.fromtimestamp(path.stat().st_mtime)
+                except Exception:
+                    ts = None
+            when = ts.strftime("%Y-%m-%d %H:%M:%S") if ts else "—"
+            label = candidate.get("prediction", "") or ""
+            self._q.put(("preview", {
+                "image": im,
+                "size": (im.width, im.height),
+                "species": sanitize_label(label) if label else "Unknown",
+                "score": float(candidate.get("prediction_score", 0.0) or 0.0),
+                "filename": path.name,
+                "when": when,
+            }))
+        except Exception:
+            logging.getLogger("trailcam_gui").debug(
+                "Preview decode failed for %s", candidate.get("filepath"),
+                exc_info=True,
+            )
+
+    def _render_preview(self, payload: dict):
+        """UI-thread: show the decoded preview image + caption, and auto-switch
+        to the Preview tab on the first one only."""
+        img = payload["image"]
+        self._preview_ctkimage = self.ctk.CTkImage(
+            light_image=img, dark_image=img, size=payload["size"]
+        )
+        self.preview_image_label.configure(image=self._preview_ctkimage, text="")
+        self.preview_species_label.configure(
+            text=f"{payload['species']}   {payload['score'] * 100:.0f}%"
+        )
+        self.preview_meta_label.configure(
+            text=f"{payload['filename']} · {payload['when']}"
+        )
+        if not self._preview_shown and not self._user_switched_tabs:
+            self._auto_switching = True
+            self.tabs.set("Preview")
+            self._auto_switching = False
+        self._preview_shown = True
+
     def _open_folder(self):
         path = getattr(self, "_summary_output", None)
         if not path:
@@ -2036,7 +2197,16 @@ class TrailCamGUI:
         self.run_btn.configure(state="disabled", text="Running…")
         self.cancel_btn.configure(state="normal", text="Cancel")
         self.close_btn.configure(state="disabled")
-        self.tabs.set("Run & Log")  # surface the streaming log + results
+        # Reset live-preview state for this run.
+        self._preview_shown = False
+        self._user_switched_tabs = False
+        self._preview_ctkimage = None
+        self.preview_image_label.configure(
+            image=self._blank_preview_img, text="Waiting for the first confident ID…"
+        )
+        self.preview_species_label.configure(text="")
+        self.preview_meta_label.configure(text="")
+        self.tabs.set("Log")  # streaming log covers model load + first batch
         self._running = True
         self.root.after(100, self._poll)
 
@@ -2071,6 +2241,7 @@ class TrailCamGUI:
                     event_window_seconds=0,
                     report_csv=None,
                     progress_callback=lambda v: self._q.put(("progress", v)),
+                    preview_callback=self._on_preview_candidate,
                     status_callback=lambda s: self._q.put(("status", s)),
                     cancel_event=self._cancel_event,
                 )
