@@ -606,6 +606,8 @@ def classify_images(
     log: logging.Logger,
     cancel_event: Optional[threading.Event] = None,
     progress_callback: Optional[Callable[[float], None]] = None,
+    min_confidence: float = 0.0,
+    preview_callback: Optional[Callable[[dict], None]] = None,
 ) -> dict[str, dict]:
     """Run SpeciesNet on representative images in cancellable batches.
 
@@ -630,8 +632,13 @@ def classify_images(
         if region:
             kwargs["admin1_region"] = region
         results = model.predict(**kwargs)
-        for pred in results.get("predictions", []):
+        batch_preds = results.get("predictions", [])
+        for pred in batch_preds:
             lookup[pred["filepath"]] = pred
+        if preview_callback is not None:
+            candidate = select_preview_candidate(batch_preds, min_confidence)
+            if candidate is not None:
+                preview_callback(candidate)
         done += len(chunk)
         if progress_callback:
             progress_callback(done / total if total else 1.0)
@@ -658,6 +665,8 @@ def classify_with_backend(
     log: logging.Logger,
     cancel_event: Optional[threading.Event] = None,
     progress_callback: Optional[Callable[[float], None]] = None,
+    min_confidence: float = 0.0,
+    preview_callback: Optional[Callable[[dict], None]] = None,
 ) -> dict[str, dict]:
     """Dispatch classification to the configured backend implementation."""
     if backend == "speciesnet":
@@ -665,6 +674,8 @@ def classify_with_backend(
             model, image_paths, country, region, log,
             cancel_event=cancel_event,
             progress_callback=progress_callback,
+            min_confidence=min_confidence,
+            preview_callback=preview_callback,
         )
     raise ValueError(f"Unsupported classifier backend: {backend}")
 
@@ -1029,6 +1040,7 @@ def run_sort(
     checkpoint_path: Optional[Path] = None,
     resume_from_checkpoint: bool = False,
     progress_callback: Optional[Callable[[float], None]] = None,
+    preview_callback: Optional[Callable[[dict], None]] = None,
     status_callback: Optional[Callable[[str], None]] = None,
     cancel_event: Optional[threading.Event] = None,
 )-> RunResult:
@@ -1225,6 +1237,8 @@ def run_sort(
         log,
         cancel_event=cancel_event,
         progress_callback=_inference_progress,
+        min_confidence=confidence,
+        preview_callback=preview_callback,
     )
     phase_timings["inference"] = time.perf_counter() - inference_start
     if progress_callback:
