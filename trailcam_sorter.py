@@ -1466,6 +1466,11 @@ class TrailCamGUI:
         self._busy = False
         self._anim_tick = 0.0
         self._cancel_event = threading.Event()
+        # Live-preview state (reset each run in _on_run).
+        self._auto_switching = False
+        self._preview_shown = False
+        self._user_switched_tabs = False
+        self._preview_ctkimage = None
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._build_ui()
@@ -1555,14 +1560,16 @@ class TrailCamGUI:
             segmented_button_unselected_color=CARD,
             segmented_button_unselected_hover_color=CLOSE_H,
             text_color=TEXT,
+            command=self._on_tab_changed,
         )
         self.tabs.pack(side="top", fill="both", expand=True, padx=8, pady=(6, 0))
         self.tabs.add("Setup")
-        self.tabs.add("Run & Log")
+        self.tabs.add("Log")
+        self.tabs.add("Preview")
         # Setup content scrolls so advanced mode can never overflow its tab.
         setup_tab = ctk.CTkScrollableFrame(self.tabs.tab("Setup"), fg_color="transparent")
         setup_tab.pack(fill="both", expand=True)
-        runlog_tab = self.tabs.tab("Run & Log")
+        runlog_tab = self.tabs.tab("Log")
 
         # ── Folders ──────────────────────────────────────────────────────
         section_header("INPUT / OUTPUT", setup_tab)
@@ -1862,6 +1869,32 @@ class TrailCamGUI:
         )
         self.log_box.pack(fill="both", expand=True, padx=16, pady=(6, 16))
 
+        # ── Preview tab (live representative ID during a run) ─────────────
+        from PIL import Image as _PILImage
+        preview_tab = self.tabs.tab("Preview")
+        # 1x1 transparent placeholder: configure(image=None) is a no-op in
+        # CTkLabel, so to reliably clear a prior run's photo on reset we swap in
+        # this invisible image (public API, no private-widget access).
+        self._blank_preview_img = ctk.CTkImage(
+            light_image=_PILImage.new("RGBA", (1, 1), (0, 0, 0, 0)),
+            dark_image=_PILImage.new("RGBA", (1, 1), (0, 0, 0, 0)), size=(1, 1),
+        )
+        self.preview_image_label = ctk.CTkLabel(
+            preview_tab, text="Waiting for the first confident ID…",
+            text_color=DIM, font=ctk.CTkFont(family="Segoe UI", size=13),
+        )
+        self.preview_image_label.pack(pady=(28, 12))
+        self.preview_species_label = ctk.CTkLabel(
+            preview_tab, text="",
+            text_color=TEXT, font=ctk.CTkFont(family="Segoe UI", size=18, weight="bold"),
+        )
+        self.preview_species_label.pack()
+        self.preview_meta_label = ctk.CTkLabel(
+            preview_tab, text="",
+            text_color=DIM, font=ctk.CTkFont(family="Segoe UI", size=11),
+        )
+        self.preview_meta_label.pack(pady=(2, 0))
+
     def _on_toggle_theme(self):
         """Flip light/dark live and persist the choice. Safe mid-run — it is a
         pure re-color (CTk re-resolves tuple colors), no rebuild or thread work."""
@@ -1910,6 +1943,8 @@ class TrailCamGUI:
                         self.pct_label.configure(text="")
                 elif kind == "result":
                     self._pending_result = value
+                elif kind == "preview":
+                    self._render_preview(value)
                 elif kind == "error":
                     self._pending_error = value
                 elif kind == "done":
@@ -2002,6 +2037,70 @@ class TrailCamGUI:
         # A dry run writes nothing, so there is no output to open.
         self.open_folder_btn.configure(state="disabled" if s["banner"] is not None else "normal")
         self.summary_card.pack(fill="x", padx=16, pady=(6, 10), before=self._log_header_row)
+
+    def _on_tab_changed(self):
+        """User clicked a tab — record it so we stop auto-switching for the rest
+        of the run. Defensive guard: in current CustomTkinter a programmatic
+        tabs.set() does NOT fire this command (only real clicks do), but the
+        _auto_switching guard keeps us correct even if that ever changes."""
+        if not self._auto_switching:
+            self._user_switched_tabs = True
+
+    def _on_preview_candidate(self, candidate: dict):
+        """Worker-thread callback: decode + caption a representative image and
+        hand it to the UI thread via the queue. Never raises into the run."""
+        try:
+            from PIL import Image
+            path = Path(candidate["filepath"])
+            with Image.open(path) as im:
+                im = im.convert("RGB")
+                max_w = 360
+                if im.width > max_w:
+                    ratio = max_w / im.width
+                    im = im.resize((max_w, max(1, int(im.height * ratio))))
+                else:
+                    im = im.copy()
+            ts = read_exif_datetime(path)
+            if ts is None:
+                try:
+                    ts = datetime.fromtimestamp(path.stat().st_mtime)
+                except Exception:
+                    ts = None
+            when = ts.strftime("%Y-%m-%d %H:%M:%S") if ts else "—"
+            label = candidate.get("prediction", "") or ""
+            self._q.put(("preview", {
+                "image": im,
+                "size": (im.width, im.height),
+                "species": sanitize_label(label) if label else "Unknown",
+                "score": float(candidate.get("prediction_score", 0.0) or 0.0),
+                "filename": path.name,
+                "when": when,
+            }))
+        except Exception:
+            logging.getLogger("trailcam_gui").debug(
+                "Preview decode failed for %s", candidate.get("filepath"),
+                exc_info=True,
+            )
+
+    def _render_preview(self, payload: dict):
+        """UI-thread: show the decoded preview image + caption, and auto-switch
+        to the Preview tab on the first one only."""
+        img = payload["image"]
+        self._preview_ctkimage = self.ctk.CTkImage(
+            light_image=img, dark_image=img, size=payload["size"]
+        )
+        self.preview_image_label.configure(image=self._preview_ctkimage, text="")
+        self.preview_species_label.configure(
+            text=f"{payload['species']}   {payload['score'] * 100:.0f}%"
+        )
+        self.preview_meta_label.configure(
+            text=f"{payload['filename']} · {payload['when']}"
+        )
+        if not self._preview_shown and not self._user_switched_tabs:
+            self._auto_switching = True
+            self.tabs.set("Preview")
+            self._auto_switching = False
+        self._preview_shown = True
 
     def _open_folder(self):
         path = getattr(self, "_summary_output", None)
