@@ -5,7 +5,10 @@ Requirements
 ------------
     pip install speciesnet customtkinter
 
-Hardware: works on CPU; auto-uses NVIDIA GPU when available.
+Hardware: runs on CPU by default. If an NVIDIA GPU is detected, the app offers
+to use it (CUDA) for much faster identification, with automatic CPU fallback if
+the GPU can't be initialized. Device choice: GUI 'Processing' dropdown or the
+CLI --device flag.
 
 Usage
 -----
@@ -44,7 +47,7 @@ from typing import Callable, Literal, Optional
 # Constants
 # ---------------------------------------------------------------------------
 
-__version__ = "1.3.1"
+__version__ = "1.4.0"
 
 # Amber accent used to signal a pending cancel (progress bar + status text).
 # Status accents, as (light, dark) so they re-theme with appearance mode.
@@ -124,6 +127,8 @@ ALL_EXTS = IMAGE_EXTS | VIDEO_EXTS
 VIDEO_MATCH_MAX_GAP_SECONDS = 60
 VIDEO_MATCH_MODES = ("nearest", "minute")
 CLASSIFIER_BACKENDS = ("speciesnet",)
+# Processing-device preference. 'auto' = use the GPU if usable, else CPU.
+DEVICE_CHOICES = ("auto", "cpu", "gpu")
 EXIF_DATETIME_TAGS = ("DateTimeOriginal", "DateTimeDigitized", "DateTime")
 EVENT_KEY_SOURCE_FILENAME = "filename"
 EVENT_KEY_SOURCE_EXIF = "exif"
@@ -201,6 +206,11 @@ def resolve_startup_settings(config: dict) -> dict:
     if theme not in ("light", "dark"):
         theme = "dark"
 
+    # "" means undecided — the GUI will detect hardware and prompt on first run.
+    device = str(config.get("device", "") or "").lower()
+    if device not in DEVICE_CHOICES:
+        device = ""
+
     return {
         "last_source": str(config.get("last_source", "") or ""),
         "last_output": str(config.get("last_output")
@@ -213,6 +223,9 @@ def resolve_startup_settings(config: dict) -> dict:
         "species_subfolders": _as_bool(config.get("species_subfolders"), True),
         "sharpness": _as_bool(config.get("sharpness"), False),
         "exif_fallback": _as_bool(config.get("exif_fallback"), True),
+        "dedupe_exact": _as_bool(config.get("dedupe_exact"), False),
+        "write_csv": _as_bool(config.get("write_csv"), False),
+        "device": device,
         # Action toggles always start in the safe state, never persisted.
         "move": False,
         "dry_run": False,
@@ -367,6 +380,10 @@ def merge_events_within_window(
     if event_window_seconds <= 0 or len(events) <= 1:
         return events, event_source_map
 
+    # The real pipeline only ever produces parseable YYYYMMDD_HHMMSS keys, so
+    # passthrough is normally empty. It guards direct/test callers (or any future
+    # key format) against silently dropping events whose key cannot be parsed
+    # into a timestamp — such events skip merging but are still carried through.
     keyed: list[tuple[str, datetime]] = []
     passthrough: dict[str, list[Path]] = {}
     for key, files in events.items():
@@ -565,7 +582,72 @@ def resolve_confidence_threshold(
 # SpeciesNet wrapper
 # ---------------------------------------------------------------------------
 
-def load_model(log: logging.Logger):
+def detect_nvidia_gpu(timeout: float = 3.0) -> Optional[str]:
+    """Return a short 'name, VRAM' description of the first NVIDIA GPU, or None.
+
+    Uses nvidia-smi only, which queries the driver without initializing the CUDA
+    runtime — so unlike torch.cuda it cannot hang on a broken setup and is safe
+    to call on the UI thread.
+    """
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except Exception:
+        return None
+    if out.returncode != 0:
+        return None
+    lines = [ln.strip() for ln in (out.stdout or "").splitlines() if ln.strip()]
+    return lines[0] if lines else None
+
+
+def _self_invoke_cmd(extra: list[str]) -> list[str]:
+    """Command that re-invokes this program with extra args, working both as a
+    PyInstaller-frozen exe and as a plain `python trailcam_sorter.py` run."""
+    if getattr(sys, "frozen", False):
+        return [sys.executable, *extra]
+    return [sys.executable, os.path.abspath(__file__), *extra]
+
+
+def probe_cuda_usable(timeout: float = 60.0) -> bool:
+    """Return True if torch can actually use a CUDA GPU.
+
+    Runs the check in an isolated subprocess (via the hidden --cuda-probe entry
+    point) so a hanging or crashing CUDA/driver init is killed by the timeout
+    instead of freezing the caller — the failure mode that originally forced
+    CPU-only. Safe to call from a background thread.
+    """
+    try:
+        r = subprocess.run(
+            _self_invoke_cmd(["--cuda-probe"]),
+            capture_output=True, timeout=timeout,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def resolve_use_gpu(device: str, log: logging.Logger) -> bool:
+    """Resolve a device preference ('auto' | 'gpu' | 'cpu') to a concrete yes/no.
+
+    'cpu'/'gpu' are taken at face value (the GUI resolves 'auto' to a concrete
+    choice up front via the safe subprocess probe). 'auto' here probes torch
+    in-process, which is fine for the CLI — a hang is interruptible with Ctrl-C.
+    """
+    device = (device or "cpu").lower()
+    if device == "cpu":
+        return False
+    if device == "gpu":
+        return True
+    try:
+        import torch
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+def load_model(log: logging.Logger, use_gpu: bool = False):
     log.info("Loading SpeciesNet model (first run downloads ~1 GB of weights)...")
     t0 = time.time()
 
@@ -626,6 +708,11 @@ def load_model(log: logging.Logger):
 
     # Also intercept plain requests.get so the detector weights download
     # (which speciesnet fetches via raw requests, not tqdm) shows progress.
+    # NOTE: this is a process-wide monkeypatch of requests.get, restored in the
+    # finally block below. It is safe only because load_model runs on the single
+    # sort worker thread and nothing else issues HTTP during model load. If a
+    # second concurrent thread ever needs requests during this window, scope the
+    # patch (e.g. thread-local) rather than patching the module global.
     _real_requests_get = None
     try:
         import requests as _requests
@@ -667,25 +754,36 @@ def load_model(log: logging.Logger):
 
     try:
         import os as _os
-        # Force CPU-only to avoid TensorFlow/PyTorch GPU probe hangs.
-        _os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+        # Select the processing device by gating GPU visibility. This must be set
+        # before speciesnet/torch are imported below, since torch reads it once at
+        # import. CPU mode (the default) also sidesteps GPU-probe hangs seen on
+        # some driver setups — the original reason this was forced CPU-only.
+        _os.environ["CUDA_VISIBLE_DEVICES"] = "0" if use_gpu else "-1"
         # Suppress HuggingFace Windows symlink warning (cosmetic only).
         _os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
-        # Prefer HuggingFace as the download source — no account required for
-        # public models.  Fall back to the default Kaggle source only if the
-        # user has Kaggle credentials already configured.
-        from speciesnet import DEFAULT_MODEL, SpeciesNet
-        _HF_MODEL = "hf:Addax-Data-Science/SPECIESNET-v4-0-2-A"
-        try:
-            import kagglehub as _kh
-            _has_kaggle = bool(_kh.config.get_kaggle_credentials())
-        except Exception:
-            _has_kaggle = False
-
-        model_name = DEFAULT_MODEL if _has_kaggle else _HF_MODEL
-        log.info("Downloading via %s", "Kaggle" if _has_kaggle else "HuggingFace (no account needed)")
+        # Always download from the HuggingFace mirror. speciesnet's built-in
+        # DEFAULT_MODEL points at Kaggle, which now requires an API key/account
+        # to download — that is what caused the original first-run hang. The
+        # Addax HuggingFace mirror needs no account and is the only public
+        # source we pin to, so every install loads the *same* model version
+        # (v4.0.2a) and produces reproducible results regardless of machine.
+        from speciesnet import SpeciesNet
+        model_name = "hf:Addax-Data-Science/SPECIESNET-v4-0-2-A"
+        log.info("Downloading SpeciesNet v4.0.2a via HuggingFace (no account needed)")
         model = SpeciesNet(model_name)
+
+        # Report the device actually in use so a silent CPU fallback is visible.
+        try:
+            import torch as _torch
+            if use_gpu and _torch.cuda.is_available():
+                log.info("Inference device: GPU — %s", _torch.cuda.get_device_name(0))
+            else:
+                if use_gpu:
+                    log.warning("GPU requested but CUDA is unavailable; running on CPU.")
+                log.info("Inference device: CPU")
+        except Exception:
+            log.info("Inference device: CPU")
     finally:
         # Restore real tqdm methods and requests.get so nothing else is affected
         try:
@@ -705,31 +803,56 @@ def load_model(log: logging.Logger):
     return model
 
 
-# Labels that are not wildlife and should never be the "flash" preview image.
-_PREVIEW_NON_WILDLIFE = {
-    "blank", "unknown", "animal", "no cv result", "human", "person", "vehicle",
-}
+# Labels that never represent an identified wild species (matched against the
+# sanitized, lower-cased most-specific label part).
+_NON_SPECIES_LABELS = {"blank", "unknown", "animal", "no cv result"}
+# Additionally suppressed from the live preview only: people and vehicles are
+# valid sort categories with their own folders, but should not be shown as the
+# preview's representative "confident wild animal".
+_PREVIEW_EXTRA_EXCLUDED = {"human", "person", "vehicle"}
+
+
+def is_confident_species(
+    label: str,
+    score: float,
+    min_confidence: float,
+    *,
+    preview: bool = False,
+) -> bool:
+    """Return True when a prediction is a confident, identified wild-species ID.
+
+    Single source of truth shared by the live preview, file sorting (Review
+    routing), and video matching so the three stay in lockstep. A label is a
+    confident species when it is non-empty, scores >= min_confidence, does not
+    contain 'unknown', and its most-specific part is not a generic/non-species
+    label (blank, animal, no cv result). With preview=True, people and vehicles
+    are also excluded.
+    """
+    if not label or score < min_confidence:
+        return False
+    if "unknown" in label.lower():
+        return False
+    name = sanitize_label(label).lower()
+    if not name or name in _NON_SPECIES_LABELS:
+        return False
+    if preview and name in _PREVIEW_EXTRA_EXCLUDED:
+        return False
+    return True
 
 
 def select_preview_candidate(predictions: list[dict], min_confidence: float) -> Optional[dict]:
     """Return the highest-confidence wildlife prediction in a batch for the live
     preview, or None if the batch has no confident animal.
 
-    Mirrors the sort path's notion of a real species: skips blank, unknown, the
-    generic 'animal'/'no cv result' labels, and (preview-only) human/vehicle, and
-    requires prediction_score >= min_confidence. Ties resolve to the first seen.
+    Uses is_confident_species (with preview=True, so human/vehicle are also
+    skipped). Ties resolve to the first seen.
     """
     best = None
     best_score = -1.0
     for pred in predictions:
         label = pred.get("prediction", "") or ""
         score = pred.get("prediction_score", 0.0) or 0.0
-        if score < min_confidence:
-            continue
-        if "unknown" in label.lower():
-            continue
-        name = sanitize_label(label).lower() if label else ""
-        if not name or name in _PREVIEW_NON_WILDLIFE:
+        if not is_confident_species(label, score, min_confidence, preview=True):
             continue
         if score > best_score:
             best = pred
@@ -788,10 +911,10 @@ def classify_images(
     return lookup
 
 
-def load_classifier_backend(backend: str, log: logging.Logger):
+def load_classifier_backend(backend: str, log: logging.Logger, use_gpu: bool = False):
     """Load the configured classifier backend."""
     if backend == "speciesnet":
-        return load_model(log)
+        return load_model(log, use_gpu=use_gpu)
     raise ValueError(f"Unsupported classifier backend: {backend}")
 
 
@@ -865,9 +988,9 @@ def build_video_match_candidates(
         pred = predictions.get(str(rep), {})
         lbl = pred.get("prediction", "")
         sc = pred.get("prediction_score", 0.0) or 0.0
-        sp = sanitize_label(lbl) if lbl else ""
         ts = parse_event_key_timestamp(ek)
-        if ts and sp and sp.lower() != "blank" and sc >= min_confidence and "unknown" not in lbl.lower():
+        if ts and is_confident_species(lbl, sc, min_confidence):
+            sp = sanitize_label(lbl)
             minute_species[ek[:13]] = sp
             candidates.append((ts, sp, float(sc)))
     return minute_species, candidates
@@ -1009,9 +1132,7 @@ def sort_files(
                 log.debug("Event %s: blank prediction, skipping", event_key)
                 continue
 
-            if not label or score < min_confidence \
-                    or "unknown" in label.lower() \
-                    or species_name.lower() in ("animal", "no cv result"):
+            if not is_confident_species(label, score, min_confidence):
                 log.debug("Event %s: score %.3f label '%s' -> Review",
                           event_key, score, label)
                 species_name = "Review"
@@ -1175,6 +1296,7 @@ def run_sort(
     use_exif_timestamps: bool = True,
     recursive: bool = True,
     event_window_seconds: int = 0,
+    device: str = "cpu",
     report_csv: Optional[Path] = None,
     checkpoint_path: Optional[Path] = None,
     resume_from_checkpoint: bool = False,
@@ -1354,7 +1476,8 @@ def run_sort(
     # 3. Load model & run inference (cannot be interrupted mid-inference)
     status("Loading model…")
     load_start = time.perf_counter()
-    model = load_classifier_backend(classifier_backend, log)
+    use_gpu = resolve_use_gpu(device, log)
+    model = load_classifier_backend(classifier_backend, log, use_gpu=use_gpu)
     phase_timings["load_model"] = time.perf_counter() - load_start
     if progress_callback:
         progress_callback(0.20)
@@ -1613,6 +1736,8 @@ class TrailCamGUI:
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._build_ui()
+        # After the window is up, offer GPU on first run if hardware is present.
+        self.root.after(400, self._maybe_prompt_gpu)
 
     def _build_ui(self):
         ctk = self.ctk
@@ -1812,6 +1937,51 @@ class TrailCamGUI:
             chk_row, text="EXIF/modified-time fallback", variable=self.exif_var,
             fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
         ), "When a filename has no timestamp, use EXIF data or the file's modified time to group events. Recommended.").pack(side="left")
+
+        chk_row2 = ctk.CTkFrame(opts, fg_color="transparent")
+        chk_row2.pack(fill="x", padx=16, pady=(0, 8))
+
+        self.dedupe_var = ctk.BooleanVar(value=self._settings["dedupe_exact"])
+        tip(ctk.CTkCheckBox(
+            chk_row2, text="Skip exact duplicates", variable=self.dedupe_var,
+            fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
+        ), "Skip files whose contents are byte-for-byte identical to one already sorted "
+           "(compared by hash). With Move on, duplicate originals are left in the source folder.").pack(side="left", padx=(0, 22))
+
+        self.csv_var = ctk.BooleanVar(value=self._settings["write_csv"])
+        tip(ctk.CTkCheckBox(
+            chk_row2, text="Write CSV report", variable=self.csv_var,
+            fg_color=GREEN, hover_color=GREEN_H, checkmark_color="white",
+        ), "Also write a spreadsheet-friendly _sort_report.csv of species counts to the output folder.").pack(side="left")
+
+        device_row = ctk.CTkFrame(opts, fg_color="transparent")
+        device_row.pack(fill="x", padx=16, pady=(0, 8))
+        ctk.CTkLabel(
+            device_row, text="Processing",
+            font=ctk.CTkFont(size=11), text_color=DIM,
+        ).pack(side="left", padx=(0, 6))
+        # Map persisted device value -> display label (undecided shows CPU until
+        # the first-run GPU prompt resolves it).
+        self.device_var = ctk.StringVar(
+            value=self._device_display(self._settings["device"] or "cpu")
+        )
+        self.device_combo = ctk.CTkComboBox(
+            device_row, variable=self.device_var, width=90,
+            values=["Auto", "GPU", "CPU"], state="readonly",
+            fg_color=INNER, border_color=SEP, button_color=SEP,
+            button_hover_color=CLOSE_H, dropdown_fg_color=INNER,
+            dropdown_hover_color=CLOSE_H, dropdown_text_color=TEXT,
+            command=lambda _v: save_config({"device": self._device_value()}),
+        )
+        self.device_combo.pack(side="left", padx=(0, 10))
+        tip(self.device_combo,
+            "Where identification runs. CPU = always (safe default). GPU = use a "
+            "detected NVIDIA GPU (much faster). Auto = GPU if usable, else CPU. "
+            "Changes take effect on the next app launch.")
+        self.device_hint = ctk.CTkLabel(
+            device_row, text="", font=ctk.CTkFont(size=10), text_color=MUTED,
+        )
+        self.device_hint.pack(side="left")
 
         basic_geo_row = ctk.CTkFrame(opts, fg_color="transparent")
         basic_geo_row.pack(fill="x", padx=16, pady=(0, 6))
@@ -2057,6 +2227,73 @@ class TrailCamGUI:
             self.region_var.set("")
             self.region_combo.configure(state="disabled")
 
+    @staticmethod
+    def _device_display(value: str) -> str:
+        return {"auto": "Auto", "gpu": "GPU", "cpu": "CPU"}.get((value or "cpu").lower(), "CPU")
+
+    def _device_value(self) -> str:
+        return {"Auto": "auto", "GPU": "gpu", "CPU": "cpu"}.get(self.device_var.get(), "cpu")
+
+    def _set_device(self, value: str):
+        """Persist a resolved device choice and reflect it in the dropdown."""
+        self._settings["device"] = value
+        self.device_var.set(self._device_display(value))
+        save_config({"device": value})
+
+    def _maybe_prompt_gpu(self):
+        """First-run only (no saved device preference): detect an NVIDIA GPU off
+        the UI thread and, if found, offer to use it."""
+        if self._settings.get("device"):
+            return
+
+        def detect():
+            name = detect_nvidia_gpu()
+            self.root.after(0, lambda: self._on_gpu_detected(name))
+
+        threading.Thread(target=detect, daemon=True).start()
+
+    def _on_gpu_detected(self, name: Optional[str]):
+        if not name:
+            # No usable GPU — settle on CPU so we never ask again.
+            self._set_device("cpu")
+            return
+        self.device_hint.configure(text=f"detected: {name}")
+        from tkinter import messagebox
+        use = messagebox.askyesno(
+            "Use your GPU?",
+            f"An NVIDIA GPU was detected:\n\n    {name}\n\n"
+            "Use it to speed up species identification?\n\n"
+            "If the GPU can't be initialized it falls back to CPU automatically. "
+            "You can change this any time under Processing.",
+            parent=self.root,
+        )
+        if not use:
+            self._set_device("cpu")
+            return
+        # Verify torch can really use it before committing (safe subprocess probe).
+        self.status_label.configure(text="Checking GPU… (one-time, ~10–30 s)")
+
+        def verify():
+            ok = probe_cuda_usable()
+            self.root.after(0, lambda: self._finish_gpu_choice(ok, name))
+
+        threading.Thread(target=verify, daemon=True).start()
+
+    def _finish_gpu_choice(self, ok: bool, name: str):
+        self.status_label.configure(text="")
+        if ok:
+            self._set_device("gpu")
+            self._append_log(f"GPU enabled for this and future runs: {name}")
+        else:
+            self._set_device("cpu")
+            from tkinter import messagebox
+            messagebox.showinfo(
+                "Using CPU",
+                "The GPU could not be initialized, so processing will use the CPU. "
+                "You can try again later from the Processing dropdown.",
+                parent=self.root,
+            )
+
     def _browse(self, var, title: str):
         from tkinter import filedialog
         folder = filedialog.askdirectory(title=title, parent=self.root)
@@ -2274,6 +2511,9 @@ class TrailCamGUI:
             "species_subfolders": self.subfolders_var.get(),
             "sharpness": self.sharpness_var.get(),
             "exif_fallback": self.exif_var.get(),
+            "dedupe_exact": self.dedupe_var.get(),
+            "write_csv": self.csv_var.get(),
+            "device": self._device_value(),
         }
 
     def _on_close(self):
@@ -2366,11 +2606,12 @@ class TrailCamGUI:
                     subfolders=self.subfolders_var.get(),
                     sharpness=self.sharpness_var.get(),
                     classifier_backend="speciesnet",
-                    dedupe_exact=False,
+                    dedupe_exact=self.dedupe_var.get(),
                     recursive=self.recursive_var.get(),
                     use_exif_timestamps=self.exif_var.get(),
                     event_window_seconds=0,
-                    report_csv=None,
+                    device=self._device_value(),
+                    report_csv=(dest_root / "_sort_report.csv") if self.csv_var.get() else None,
                     progress_callback=lambda v: self._q.put(("progress", v)),
                     preview_callback=self._on_preview_candidate,
                     status_callback=lambda s: self._q.put(("status", s)),
@@ -2397,6 +2638,16 @@ class TrailCamGUI:
 # ---------------------------------------------------------------------------
 
 def main():
+    # Hidden entry point used by the GUI's safe (subprocess) GPU probe. Kept
+    # before argparse so it works identically as a script or a frozen exe.
+    if len(sys.argv) == 2 and sys.argv[1] == "--cuda-probe":
+        try:
+            import torch
+            ok = bool(torch.cuda.is_available())
+        except Exception:
+            ok = False
+        sys.exit(0 if ok else 1)
+
     # No arguments → launch GUI
     if len(sys.argv) == 1:
         TrailCamGUI().run()
@@ -2447,6 +2698,9 @@ def main():
                         help="Skip exact duplicate files based on content hash.")
     parser.add_argument("--event-window-seconds", type=int, default=0,
                         help="Merge adjacent timestamp events within this gap in seconds (default: 0, disabled).")
+    parser.add_argument("--device", choices=DEVICE_CHOICES, default="auto",
+                        help="Processing device: auto (GPU if usable, else CPU; default), "
+                             "cpu, or gpu (NVIDIA/CUDA).")
     parser.add_argument("--checkpoint-file", default=None,
                         help="Optional checkpoint JSON path for completed event keys.")
     parser.add_argument("--resume-from-checkpoint", action="store_true",
@@ -2457,7 +2711,10 @@ def main():
     parser.set_defaults(use_exif_timestamps=True)
     args = parser.parse_args()
 
-    if args.region and (args.country or "").upper() != "USA":
+    if args.country:
+        args.country = args.country.strip().upper()
+
+    if args.region and (args.country or "") != "USA":
         parser.error("--region requires --country USA")
 
     if args.confidence is not None and not (0.0 <= args.confidence <= 1.0):
@@ -2481,6 +2738,16 @@ def main():
         )
     else:
         log.info("Using explicit confidence threshold %.2f", confidence_threshold)
+
+    # COUNTRY_CODES is a convenience subset, not the full ISO 3166-1 set that
+    # SpeciesNet accepts, so warn (don't fail) on unrecognized codes — this
+    # catches typos like 'US' for 'USA' without rejecting valid unlisted codes.
+    if args.country and args.country not in COUNTRY_CODES:
+        log.warning(
+            "Country '%s' is not a recognized ISO 3166-1 alpha-3 code; "
+            "predictions may not be geofenced as expected.",
+            args.country,
+        )
 
     source = Path(args.source).resolve()
     if not source.is_dir():
@@ -2512,6 +2779,7 @@ def main():
         video_match_mode=args.video_match_mode,
         use_exif_timestamps=args.use_exif_timestamps,
         recursive=not args.no_recursive,
+        device=args.device,
         event_window_seconds=args.event_window_seconds,
         report_csv=Path(args.report_csv).resolve() if args.report_csv else None,
         checkpoint_path=Path(args.checkpoint_file).resolve() if args.checkpoint_file else None,

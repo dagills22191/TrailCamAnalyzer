@@ -5,7 +5,7 @@
 ; Output: installer\output\TrailCamSorter-Setup.exe
 
 #define AppName "TrailCam Sorter"
-#define AppVersion "1.3.1"
+#define AppVersion "1.4.0"
 #define AppPublisher "dagills22191"
 #define AppURL "https://github.com/dagills22191/TrailCamAnalyzer"
 #define AppExeName "TrailCamSorter.exe"
