@@ -46,6 +46,20 @@ Automatically identifies animals in trail camera photos and videos using Google 
   _sort_dashboard.html  (optional, via render_sort_dashboard.py)
 ```
 
+## Upgrading
+
+### v1.3.0 → v1.3.1 (recommended)
+
+v1.3.1 fixes a first-run model download issue where the download could hang silently with no progress shown. If you installed v1.3.0 and experienced a freeze at "Loading model…" with no network activity, upgrade to v1.3.1.
+
+- Model weights are now downloaded from HuggingFace (no account required) instead of Kaggle, which was affected by an API auth change in `kagglehub` 1.0
+- Download progress is now shown in the Log tab for both the classifier and detector weight files
+- The app no longer hangs due to GPU probe issues on CPU-only machines
+
+To upgrade: download and run the new `TrailCamSorter-Setup.exe` — no uninstall needed. Your cached model weights are preserved.
+
+---
+
 ## Requirements
 
 - **Windows installer users:** no Python or conda needed — the installer bundles everything

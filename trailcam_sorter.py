@@ -44,7 +44,7 @@ from typing import Callable, Literal, Optional
 # Constants
 # ---------------------------------------------------------------------------
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 # Amber accent used to signal a pending cancel (progress bar + status text).
 # Status accents, as (light, dark) so they re-theme with appearance mode.
@@ -568,8 +568,139 @@ def resolve_confidence_threshold(
 def load_model(log: logging.Logger):
     log.info("Loading SpeciesNet model (first run downloads ~1 GB of weights)...")
     t0 = time.time()
-    from speciesnet import DEFAULT_MODEL, SpeciesNet
-    model = SpeciesNet(DEFAULT_MODEL)
+
+    # Intercept tqdm progress bars so kagglehub/huggingface download speed and
+    # progress are visible in the Log tab instead of silently hanging.
+    # kagglehub imports `from tqdm import tqdm` at module load time, so patching
+    # tqdm.tqdm and tqdm.auto.tqdm is not enough — we must also patch the class
+    # itself in-place (replace __init__ and update on the real class) so that
+    # already-bound references pick up the hook too.
+    _real_tqdm_init = None
+    _real_tqdm_update = None
+    try:
+        import tqdm as _tqdm_mod
+
+        _real_tqdm = _tqdm_mod.tqdm
+        _real_tqdm_init = _real_tqdm.__init__
+        _real_tqdm_update = _real_tqdm.update
+        _last_logged: list[float] = [0.0]  # mutable cell for closure
+
+        def _patched_init(self, *args, **kwargs):
+            import sys as _sys
+            # PyInstaller GUI apps have sys.stderr=None; redirect tqdm to a
+            # no-op stream so it doesn't crash on write.
+            if kwargs.get("file") is None and not getattr(_sys, "stderr", None):
+                kwargs["file"] = open(os.devnull, "w")  # noqa: WPS515
+                kwargs.setdefault("disable", True)
+            _real_tqdm_init(self, *args, **kwargs)
+            total = getattr(self, "total", None) or 0
+            if total >= 1_048_576:  # only log files >= 1 MB
+                log.info(
+                    "Downloading model file: %.0f MB total",
+                    total / 1_048_576,
+                )
+
+        def _patched_update(self, n=1):
+            try:
+                _real_tqdm_update(self, n)
+            except Exception:
+                pass
+            import time as _time
+            now = _time.monotonic()
+            if now - _last_logged[0] >= 5.0 and (getattr(self, "total", None) or 0) >= 1_048_576:
+                pct = 100.0 * self.n / self.total
+                mb_done = self.n / 1_048_576
+                mb_total = self.total / 1_048_576
+                rate_mb = (self.format_dict.get("rate") or 0) / 1_048_576
+                log.info(
+                    "  Download: %.0f / %.0f MB (%.0f%%) — %.2f MB/s",
+                    mb_done, mb_total, pct, rate_mb,
+                )
+                _last_logged[0] = now
+
+        _real_tqdm.__init__ = _patched_init
+        _real_tqdm.update = _patched_update
+        _tqdm_mod.auto.tqdm = _real_tqdm
+    except Exception:
+        pass  # tqdm not available; silent fallback
+
+    # Also intercept plain requests.get so the detector weights download
+    # (which speciesnet fetches via raw requests, not tqdm) shows progress.
+    _real_requests_get = None
+    try:
+        import requests as _requests
+
+        _real_requests_get = _requests.get
+
+        def _progress_get(url, **kwargs):
+            resp = _real_requests_get(url, **kwargs)
+            if not kwargs.get("stream"):
+                return resp
+            total = int(resp.headers.get("content-length", 0))
+            if total > 10_485_760:  # only log for files >10 MB
+                log.info("Downloading %s (%.0f MB)...", url.split("/")[-1], total / 1_048_576)
+            orig_iter = resp.iter_content
+
+            def _logged_iter_content(chunk_size=1):
+                import time as _time
+                downloaded = 0
+                last_logged = 0.0
+                for chunk in orig_iter(chunk_size=chunk_size):
+                    downloaded += len(chunk)
+                    now = _time.monotonic()
+                    if total and now - last_logged >= 5.0:
+                        log.info(
+                            "  Download: %.0f / %.0f MB (%.0f%%)",
+                            downloaded / 1_048_576,
+                            total / 1_048_576,
+                            100.0 * downloaded / total,
+                        )
+                        last_logged = now
+                    yield chunk
+
+            resp.iter_content = _logged_iter_content
+            return resp
+
+        _requests.get = _progress_get
+    except Exception:
+        pass
+
+    try:
+        import os as _os
+        # Force CPU-only to avoid TensorFlow/PyTorch GPU probe hangs.
+        _os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+        # Suppress HuggingFace Windows symlink warning (cosmetic only).
+        _os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+
+        # Prefer HuggingFace as the download source — no account required for
+        # public models.  Fall back to the default Kaggle source only if the
+        # user has Kaggle credentials already configured.
+        from speciesnet import DEFAULT_MODEL, SpeciesNet
+        _HF_MODEL = "hf:Addax-Data-Science/SPECIESNET-v4-0-2-A"
+        try:
+            import kagglehub as _kh
+            _has_kaggle = bool(_kh.config.get_kaggle_credentials())
+        except Exception:
+            _has_kaggle = False
+
+        model_name = DEFAULT_MODEL if _has_kaggle else _HF_MODEL
+        log.info("Downloading via %s", "Kaggle" if _has_kaggle else "HuggingFace (no account needed)")
+        model = SpeciesNet(model_name)
+    finally:
+        # Restore real tqdm methods and requests.get so nothing else is affected
+        try:
+            if _real_tqdm_init is not None:
+                _real_tqdm.__init__ = _real_tqdm_init
+                _real_tqdm.update = _real_tqdm_update
+        except Exception:
+            pass
+        try:
+            if _real_requests_get is not None:
+                import requests as _requests
+                _requests.get = _real_requests_get
+        except Exception:
+            pass
+
     log.info("Model ready in %.1f s", time.time() - t0)
     return model
 

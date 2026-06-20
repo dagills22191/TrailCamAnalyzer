@@ -88,6 +88,9 @@ Goal: cosmetic and documentation cleanup.
 
 - [ ] README updates for any new flags (`--version`, validation behaviour).
 - [ ] GUI layout / wording nits.
+- [ ] Map Latin-only species labels to common names (speciesnet returns scientific
+  names for species that lack a common name in its label set; a lookup table or
+  enrichment pass could normalize these for display and folder naming).
 - [ ] Consider the deferred items in memory `project-state` (nearest-neighbour
   video matching is already shipped as `--video-match-mode nearest`; module split
   still deferred).
