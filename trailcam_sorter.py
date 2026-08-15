@@ -47,7 +47,7 @@ from typing import Callable, Literal, Optional
 # Constants
 # ---------------------------------------------------------------------------
 
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 
 # Amber accent used to signal a pending cancel (progress bar + status text).
 # Status accents, as (light, dark) so they re-theme with appearance mode.
@@ -348,19 +348,29 @@ def group_events(
     recursive: bool = True,
     use_exif_timestamps: bool = False,
     event_source_map: Optional[dict[str, set[str]]] = None,
+    log: Optional[logging.Logger] = None,
 ) -> dict[str, list[Path]]:
     """Group files by their base timestamp (the 'event key').
 
     Returns {event_key: [file1, file2, ...]} where event_key = "20240615_083012".
     If use_exif_timestamps=True, non-matching files use EXIF capture time when
     available (images), otherwise file modified time.
+
+    Files that raise OSError while being inspected (e.g. a corrupt entry on an
+    SD card — Windows error 1392) are skipped with a warning so one bad file
+    cannot abort the entire scan.
     """
     events: dict[str, list[Path]] = defaultdict(list)
     scan = folder.rglob("*") if recursive else folder.glob("*")
     for f in sorted(scan):
-        if not f.is_file():
+        try:
+            if not f.is_file():
+                continue
+            event_key, source = event_key_and_source_for_file(f, use_exif_timestamps=use_exif_timestamps)
+        except OSError as e:
+            if log:
+                log.warning("Skipping unreadable file (%s): %s", e.__class__.__name__, f)
             continue
-        event_key, source = event_key_and_source_for_file(f, use_exif_timestamps=use_exif_timestamps)
         if event_key:
             events[event_key].append(f)
             if event_source_map is not None and source:
@@ -1350,6 +1360,7 @@ def run_sort(
         recursive=recursive,
         use_exif_timestamps=use_exif_timestamps,
         event_source_map=event_source_map,
+        log=log,
     )
     events, merged_sources = merge_events_within_window(
         events,
