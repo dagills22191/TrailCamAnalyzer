@@ -620,13 +620,18 @@ def _self_invoke_cmd(extra: list[str]) -> list[str]:
     return [sys.executable, os.path.abspath(__file__), *extra]
 
 
-def probe_cuda_usable(timeout: float = 60.0) -> bool:
+def probe_cuda_usable(timeout: float = 180.0) -> bool:
     """Return True if torch can actually use a CUDA GPU.
 
     Runs the check in an isolated subprocess (via the hidden --cuda-probe entry
     point) so a hanging or crashing CUDA/driver init is killed by the timeout
     instead of freezing the caller — the failure mode that originally forced
     CPU-only. Safe to call from a background thread.
+
+    The timeout is generous (180 s) because the very first launch of a freshly
+    installed GPU build can be slow: Windows Defender scans the ~4 GB of bundled
+    CUDA DLLs on first load, so `import torch` alone can take tens of seconds.
+    A tight timeout here would wrongly fall back to CPU on first run.
     """
     try:
         r = subprocess.run(
@@ -2282,7 +2287,8 @@ class TrailCamGUI:
             self._set_device("cpu")
             return
         # Verify torch can really use it before committing (safe subprocess probe).
-        self.status_label.configure(text="Checking GPU… (one-time, ~10–30 s)")
+        self.status_label.configure(
+            text="Checking GPU… (one-time; may take a minute or two on first launch)")
 
         def verify():
             ok = probe_cuda_usable()
