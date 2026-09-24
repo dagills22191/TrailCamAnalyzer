@@ -662,6 +662,36 @@ def resolve_use_gpu(device: str, log: logging.Logger) -> bool:
         return False
 
 
+# SpeciesNet weights on the Addax HuggingFace mirror, pinned to an exact commit.
+# To adopt a newer upstream model, update the revision (and verify info.json's
+# "version") in a release — never track the moving "main" branch.
+MODEL_HF_REPO = "Addax-Data-Science/SPECIESNET-v4-0-2-A"
+MODEL_HF_REVISION = "49bfed106dee7995fb96d22ebbcfd5fd91edf036"  # v4.0.2a
+
+
+def _resolve_pinned_model(log: logging.Logger) -> Path:
+    """Return the local folder holding the pinned SpeciesNet files.
+
+    Uses the local cache when the pinned snapshot is complete (no network
+    call); otherwise downloads it, resuming any partial download.
+    """
+    from huggingface_hub import snapshot_download
+
+    try:
+        local = Path(snapshot_download(
+            MODEL_HF_REPO, revision=MODEL_HF_REVISION, local_files_only=True,
+        ))
+        info = json.loads((local / "info.json").read_text(encoding="utf-8"))
+        if (local / info["classifier"]).is_file():
+            log.info("Using cached SpeciesNet %s", info.get("version", "?"))
+            return local
+    except Exception:
+        pass  # not cached, or incomplete — fall through to download
+
+    log.info("Downloading SpeciesNet v4.0.2a via HuggingFace (no account needed)")
+    return Path(snapshot_download(MODEL_HF_REPO, revision=MODEL_HF_REVISION))
+
+
 def load_model(log: logging.Logger, use_gpu: bool = False):
     log.info("Loading SpeciesNet model (first run downloads ~1 GB of weights)...")
     t0 = time.time()
@@ -780,13 +810,17 @@ def load_model(log: logging.Logger, use_gpu: bool = False):
         # Always download from the HuggingFace mirror. speciesnet's built-in
         # DEFAULT_MODEL points at Kaggle, which now requires an API key/account
         # to download — that is what caused the original first-run hang. The
-        # Addax HuggingFace mirror needs no account and is the only public
-        # source we pin to, so every install loads the *same* model version
-        # (v4.0.2a) and produces reproducible results regardless of machine.
+        # Addax HuggingFace mirror needs no account.
+        #
+        # We resolve the files ourselves at a pinned commit and hand speciesnet
+        # the local folder. Letting speciesnet resolve "hf:<repo>" tracks the
+        # repo's latest commit, so any upstream push (even a README edit)
+        # re-downloads ~500 MB into a new snapshot folder and could silently
+        # swap the model under users. Pinning keeps every install on the same
+        # files and lets cached runs skip the network entirely.
         from speciesnet import SpeciesNet
-        model_name = "hf:Addax-Data-Science/SPECIESNET-v4-0-2-A"
-        log.info("Downloading SpeciesNet v4.0.2a via HuggingFace (no account needed)")
-        model = SpeciesNet(model_name)
+        model_dir = _resolve_pinned_model(log)
+        model = SpeciesNet(str(model_dir))
 
         # Report the device actually in use so a silent CPU fallback is visible.
         try:
