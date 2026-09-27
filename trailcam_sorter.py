@@ -151,6 +151,8 @@ LOG_FMT = "%(asctime)s  %(levelname)-8s  %(message)s"
 LOG_FMT_SHORT = "%(asctime)s  %(message)s"
 
 CONFIG_PATH = Path.home() / ".trailcam_sorter.json"
+# Longest side (px) kept for live-preview images; the UI scales down to fit.
+PREVIEW_MAX_SIDE = 1600
 INFERENCE_BATCH_SIZE = 50
 
 
@@ -240,6 +242,15 @@ def display_path(p: str) -> str:
     consistent. Empty strings pass through unchanged.
     """
     return os.path.normpath(p) if p else p
+
+
+def fit_preview_size(img_w: int, img_h: int, box_w: int, box_h: int) -> tuple[int, int]:
+    """Largest size that fits an img_w x img_h image inside box_w x box_h,
+    keeping aspect ratio and never enlarging past the image's own size."""
+    if img_w <= 0 or img_h <= 0 or box_w <= 0 or box_h <= 0:
+        return max(1, img_w), max(1, img_h)
+    scale = min(box_w / img_w, box_h / img_h, 1.0)
+    return max(1, round(img_w * scale)), max(1, round(img_h * scale))
 
 
 def load_checkpoint(checkpoint_path: Path) -> set[str]:
@@ -1783,6 +1794,10 @@ class TrailCamGUI:
         self._preview_shown = False
         self._user_switched_tabs = False
         self._preview_ctkimage = None
+        self._preview_resize_job = None
+        # Last usable preview area (logical px); a fallback for when the
+        # Preview tab isn't laid out yet (e.g. first image arrives off-tab).
+        self._preview_box = (560, 320)
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._build_ui()
@@ -2261,6 +2276,9 @@ class TrailCamGUI:
             text_color=DIM, font=ctk.CTkFont(family="Segoe UI", size=11),
         )
         self.preview_meta_label.pack(pady=(2, 0))
+        # Refit the preview whenever the tab changes size (resize/maximize,
+        # or the tab being shown for the first time).
+        preview_tab.bind("<Configure>", self._on_preview_tab_resized, add="+")
 
     def _on_toggle_theme(self):
         """Flip light/dark live and persist the choice. Safe mid-run — it is a
@@ -2489,12 +2507,9 @@ class TrailCamGUI:
             path = Path(candidate["filepath"])
             with Image.open(path) as im:
                 im = im.convert("RGB")
-                max_w = 360
-                if im.width > max_w:
-                    ratio = max_w / im.width
-                    im = im.resize((max_w, max(1, int(im.height * ratio))))
-                else:
-                    im = im.copy()
+                # Keep enough detail for a maximized window; the UI scales it
+                # to fit the Preview tab (see _fit_preview).
+                im.thumbnail((PREVIEW_MAX_SIDE, PREVIEW_MAX_SIDE))
             ts = read_exif_datetime(path)
             if ts is None:
                 try:
@@ -2524,6 +2539,7 @@ class TrailCamGUI:
         self._preview_ctkimage = self.ctk.CTkImage(
             light_image=img, dark_image=img, size=payload["size"]
         )
+        self._fit_preview()
         self.preview_image_label.configure(image=self._preview_ctkimage, text="")
         self.preview_species_label.configure(
             text=f"{payload['species']}   {payload['score'] * 100:.0f}%"
@@ -2536,6 +2552,36 @@ class TrailCamGUI:
             self.tabs.set("Preview")
             self._auto_switching = False
         self._preview_shown = True
+
+    def _on_preview_tab_resized(self, _event=None):
+        """Debounce window resizes: refit once dragging pauses (~80 ms)."""
+        if self._preview_resize_job is not None:
+            self.root.after_cancel(self._preview_resize_job)
+        self._preview_resize_job = self.root.after(80, self._fit_preview)
+
+    def _fit_preview(self):
+        """Scale the current preview image to fill the Preview tab above the
+        caption, keeping aspect ratio and never enlarging past the source."""
+        self._preview_resize_job = None
+        img = self._preview_ctkimage
+        if img is None:
+            return
+        # winfo sizes are physical pixels, but CTkImage sizes and pack paddings
+        # are logical (CTk multiplies both by display scaling), so work in
+        # logical pixels throughout.
+        scale = self.ctk.ScalingTracker.get_widget_scaling(self.preview_image_label) or 1.0
+        tab = self.tabs.tab("Preview")
+        tab_w, tab_h = tab.winfo_width(), tab.winfo_height()
+        if tab_w > 1 and tab_h > 1:  # 1x1 means the tab isn't laid out/visible
+            captions = (self.preview_species_label.winfo_reqheight()
+                        + self.preview_meta_label.winfo_reqheight()) / scale
+            # Minus pack paddings (28+12 around the image, 2 above meta) and a
+            # small bottom/side margin.
+            self._preview_box = (tab_w / scale - 32,
+                                 tab_h / scale - captions - 28 - 12 - 2 - 16)
+        box_w, box_h = (max(1, int(v)) for v in self._preview_box)
+        src = img.cget("light_image")
+        img.configure(size=fit_preview_size(src.width, src.height, box_w, box_h))
 
     def _open_folder(self):
         path = getattr(self, "_summary_output", None)
